@@ -1,0 +1,13 @@
+[package]
+name = "lighttrack-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LightTrack shared types: normalized LLM events, price book + cost calc, limits, scoring."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true

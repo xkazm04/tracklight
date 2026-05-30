@@ -1,0 +1,26 @@
+# Rust
+/target
+**/target
+*.pdb
+# Cargo.lock is committed (this workspace builds binaries).
+
+# Local data stores
+*.db
+*.db-wal
+*.db-shm
+*.duckdb
+data/
+
+# Secrets / config
+.env
+.env.*
+*.local.toml
+service-account*.json
+*-key.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

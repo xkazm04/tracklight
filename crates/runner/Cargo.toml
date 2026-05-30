@@ -1,0 +1,10 @@
+[package]
+name = "lighttrack-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LightTrack scoring/benchmark engine — drives `claude -p`. The judge (unbudgeted)."
+
+[dependencies]
+lighttrack-core.workspace = true
+# Added in Phase 3: tokio, serde_json, anyhow (spawns `claude -p --output-format json --json-schema`)

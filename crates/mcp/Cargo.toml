@@ -1,0 +1,10 @@
+[package]
+name = "lighttrack-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LightTrack MCP server — query traces/costs/scores and trigger benchmarks from Claude Code."
+
+[dependencies]
+lighttrack-core.workspace = true
+# Added in Phase 4: an MCP SDK (or hand-rolled stdio JSON-RPC), tokio, serde_json

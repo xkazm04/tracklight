@@ -1,0 +1,25 @@
+# Copy to lighttrack.local.toml (git-ignored) and edit. Env vars override (LIGHTTRACK_*).
+
+[server]
+bind = "127.0.0.1:8787"     # Phase B: "0.0.0.0:8080" behind Cloud Run / TLS
+auth_mode = "dev"            # "dev" (relaxed) | "enforced" (require API keys)
+
+[store]
+backend = "sqlite"           # "sqlite" (local) | "bigquery" (cloud)
+sqlite_path = "data/lighttrack.db"
+# [store.bigquery]
+# project = "your-gcp-project"
+# dataset = "lighttrack"
+
+[engine]                     # the scoring/benchmark judge — unbudgeted by design
+provider = "claude_code"     # "claude_code" (claude -p) | "anthropic_api" | ...
+judge_model = "claude-haiku-4-5"
+claude_bin = "claude"
+bare = true                  # use --bare for reproducible CI-style runs (needs ANTHROPIC_API_KEY)
+
+[notify]
+# webhook = "https://ntfy.sh/your-topic"
+# slack_webhook = ""
+
+[pricing]
+path = "config/pricing.json"

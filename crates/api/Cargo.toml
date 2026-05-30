@@ -1,0 +1,10 @@
+[package]
+name = "lighttrack-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LightTrack ingest + query REST service (axum). Local box → Cloud Run."
+
+[dependencies]
+lighttrack-core.workspace = true
+# Added in Phase 1: tokio, axum, tower, rusqlite (bundled), serde, serde_json, anyhow
