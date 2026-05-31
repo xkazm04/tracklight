@@ -23,8 +23,8 @@ use lighttrack_core::{
     BenchTarget, Benchmark, BenchmarkCase, DatasetItem, Job, LlmEvent, ModelPriceRow, Rubric,
 };
 use lighttrack_engine::{
-    build_eval_prompt, build_judge_prompt, generate, run_judge, run_rubric_judge, run_text,
-    EngineConfig,
+    build_eval_prompt, build_judge_prompt, generate, parse_judge_spec, run_judge, run_rubric_judge,
+    run_text, EngineConfig,
 };
 
 #[derive(Parser)]
@@ -137,7 +137,8 @@ fn main() -> Result<()> {
             output,
             project,
         } => {
-            let outcome = judge_one(&engine, rubric, input, output)?;
+            let (jp, jm) = parse_judge_spec(&engine.model);
+            let outcome = judge_one(&engine, &jp, &jm, rubric, input, output)?;
             let score = build_score(project, None, rubric, &outcome);
             let stored = post(&cli, &http, "/v1/scores", &score)?;
             println!("posted score: {}", serde_json::to_string_pretty(&stored)?);
@@ -278,12 +279,12 @@ fn run_compare(
     targets: &[BenchTarget],
     samples: u32,
 ) -> Result<()> {
+    let (jp, jm) = parse_judge_spec(&bench.judge_model);
     println!(
-        "benchmark '{}' COMPARE: {} target(s) × {} case(s), judge={}",
+        "benchmark '{}' COMPARE: {} target(s) × {} case(s), judge={jp}/{jm}",
         bench.name,
         targets.len(),
         cases.len(),
-        engine.model
     );
     let rubric: Option<Rubric> = match &bench.rubric_id {
         Some(rid) => Some(get(cli, http, &format!("/v1/rubrics/{rid}"))?),
@@ -325,7 +326,8 @@ fn run_compare(
             if let Some(l) = gen.latency_ms {
                 latencies.push(l);
             }
-            let (score, pass, jcost) = judge_output(engine, &rubric, bench, case, &gen.output, samples)?;
+            let (score, pass, jcost) =
+                judge_output(engine, &jp, &jm, &rubric, bench, case, &gen.output, samples, &prices)?;
             judge_cost += jcost;
             overall_sum += score;
             if pass {
@@ -374,28 +376,42 @@ fn run_compare(
     Ok(())
 }
 
-/// Judge a single generated output via the rubric (if any) or the freeform rubric text.
+/// Judge a single generated output via the rubric (if any) or the freeform rubric text, using the
+/// configured judge provider/model. Judge cost is priced from the book when the provider gives no $.
+#[allow(clippy::too_many_arguments)]
 fn judge_output(
     judge_engine: &EngineConfig,
+    judge_provider: &str,
+    judge_model: &str,
     rubric: &Option<Rubric>,
     bench: &Benchmark,
     case: &BenchmarkCase,
     output: &str,
     samples: u32,
+    prices: &[ModelPriceRow],
 ) -> Result<(f64, bool, f64)> {
     if let Some(r) = rubric {
-        let o = run_rubric_judge(judge_engine, r, &case.input, case.expected.as_deref(), output, samples)
-            .context("rubric judge failed")?;
-        Ok((o.overall, o.pass, o.cost_usd.unwrap_or(0.0)))
+        let o = run_rubric_judge(
+            judge_engine, judge_provider, judge_model, r, &case.input,
+            case.expected.as_deref(), output, samples,
+        )
+        .context("rubric judge failed")?;
+        let jc = o.cost_usd.unwrap_or_else(|| {
+            price_gen_cost(prices, judge_provider, judge_model, o.input_tokens, o.output_tokens)
+        });
+        Ok((o.overall, o.pass, jc))
     } else {
         let prompt = build_eval_prompt(&bench.rubric, &case.input, case.expected.as_deref(), output);
-        let v = run_judge(judge_engine, &prompt).context("judge failed")?;
+        let v = run_judge(judge_engine, judge_provider, judge_model, &prompt).context("judge failed")?;
         let norm = if v.verdict.max > 0.0 {
             v.verdict.score / v.verdict.max
         } else {
             v.verdict.score
         };
-        Ok((norm, v.verdict.pass, v.cost_usd.unwrap_or(0.0)))
+        let jc = v.cost_usd.unwrap_or_else(|| {
+            price_gen_cost(prices, judge_provider, judge_model, v.input_tokens, v.output_tokens)
+        });
+        Ok((norm, v.verdict.pass, jc))
     }
 }
 
@@ -412,19 +428,15 @@ fn run_rubric_benchmark(
     heal: bool,
 ) -> Result<()> {
     let rubric: Rubric = get(cli, http, &format!("/v1/rubrics/{rubric_id}"))?;
-    let bench_engine = EngineConfig {
-        claude_bin: engine.claude_bin.clone(),
-        model: bench.judge_model.clone(),
-        bare: engine.bare,
-    };
+    let (jp, jm) = parse_judge_spec(&bench.judge_model);
+    let prices: Vec<ModelPriceRow> = get(cli, http, "/v1/prices").unwrap_or_default();
     println!(
-        "benchmark '{}' — {} case(s), rubric '{}' ({} dims, threshold {:.2}), judge={}, samples={}",
+        "benchmark '{}' — {} case(s), rubric '{}' ({} dims, threshold {:.2}), judge={jp}/{jm}, samples={}",
         bench.name,
         cases.len(),
         rubric.name,
         rubric.dimensions.len(),
         rubric.threshold,
-        bench.judge_model,
         samples
     );
 
@@ -445,20 +457,17 @@ fn run_rubric_benchmark(
             }
         };
         let o = run_rubric_judge(
-            &bench_engine,
-            &rubric,
-            &case.input,
-            case.expected.as_deref(),
-            output,
-            samples,
+            engine, &jp, &jm, &rubric, &case.input, case.expected.as_deref(), output, samples,
         )
-        .context("rubric judge (claude -p) failed")?;
+        .context("rubric judge failed")?;
         judged += 1;
         overall_sum += o.overall;
         if o.pass {
             passes += 1;
         }
-        cost += o.cost_usd.unwrap_or(0.0);
+        cost += o
+            .cost_usd
+            .unwrap_or_else(|| price_gen_cost(&prices, &jp, &jm, o.input_tokens, o.output_tokens));
         if let Some(l) = o.latency_ms {
             latencies.push(l);
         }
@@ -549,7 +558,7 @@ clarifications) targeting the weakest dimensions. Return only the bullets.",
             pass_rate * 100.0,
             judged - passes
         );
-        match run_text(&bench_engine, &prompt) {
+        match run_text(engine, &prompt) {
             Ok(t) => Some(t.text.trim().to_string()),
             Err(e) => {
                 eprintln!("healing pass failed: {e}");
@@ -767,23 +776,17 @@ fn run_benchmark(
         return run_rubric_benchmark(cli, http, engine, &bench, &cases, &rid, samples, heal);
     }
 
+    let (jp, jm) = parse_judge_spec(&bench.judge_model);
+    let prices: Vec<ModelPriceRow> = get(cli, http, "/v1/prices").unwrap_or_default();
     println!(
-        "benchmark '{}' — {} case(s), judge={}, baseline={}",
+        "benchmark '{}' — {} case(s), judge={jp}/{jm}, baseline={}",
         bench.name,
         cases.len(),
-        bench.judge_model,
         bench
             .baseline_score
             .map(|b| format!("{b:.3}"))
             .unwrap_or_else(|| "none".into())
     );
-
-    // Judge with the benchmark's own model.
-    let bench_engine = EngineConfig {
-        claude_bin: engine.claude_bin.clone(),
-        model: bench.judge_model.clone(),
-        bare: engine.bare,
-    };
 
     let (mut sum, mut n, mut passes, mut cost) = (0.0_f64, 0u32, 0u32, 0.0_f64);
     let mut latencies: Vec<u64> = Vec::new();
@@ -797,7 +800,7 @@ fn run_benchmark(
             }
         };
         let prompt = build_eval_prompt(&bench.rubric, &case.input, case.expected.as_deref(), output);
-        let outcome = run_judge(&bench_engine, &prompt).context("judge (claude -p) failed")?;
+        let outcome = run_judge(engine, &jp, &jm, &prompt).context("judge failed")?;
         let norm = if outcome.verdict.max > 0.0 {
             outcome.verdict.score / outcome.verdict.max
         } else {
@@ -808,7 +811,9 @@ fn run_benchmark(
         if outcome.verdict.pass {
             passes += 1;
         }
-        cost += outcome.cost_usd.unwrap_or(0.0);
+        cost += outcome.cost_usd.unwrap_or_else(|| {
+            price_gen_cost(&prices, &jp, &jm, outcome.input_tokens, outcome.output_tokens)
+        });
         if let Some(l) = outcome.latency_ms {
             latencies.push(l);
         }
@@ -904,8 +909,9 @@ fn score_recent(
                 continue;
             }
         };
+        let (jp, jm) = parse_judge_spec(&engine.model);
         print!("  - judging {} ({})... ", short(&ev.id), ev.model);
-        let outcome = judge_one(engine, rubric, &input, &output)?;
+        let outcome = judge_one(engine, &jp, &jm, rubric, &input, &output)?;
         let score = build_score(&ev.project_id, Some(&ev.id), rubric, &outcome);
         post(cli, http, "/v1/scores", &score)?;
         scored += 1;
@@ -927,12 +933,14 @@ fn score_recent(
 
 fn judge_one(
     engine: &EngineConfig,
+    provider: &str,
+    model: &str,
     rubric: &str,
     input: &str,
     output: &str,
 ) -> Result<lighttrack_engine::JudgeOutcome> {
     let prompt = build_judge_prompt(rubric, input, output);
-    run_judge(engine, &prompt).context("judge (claude -p) failed")
+    run_judge(engine, provider, model, &prompt).context("judge failed")
 }
 
 fn build_score(

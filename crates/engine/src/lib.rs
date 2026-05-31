@@ -15,7 +15,7 @@ use std::time::Instant;
 use serde_json::{json, Map, Value};
 use thiserror::Error;
 
-use lighttrack_core::{judge_verdict_schema, JudgeVerdict, Rubric};
+use lighttrack_core::{JudgeVerdict, Rubric};
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -98,6 +98,8 @@ pub struct RubricOutcome {
     pub cost_usd: Option<f64>,
     pub latency_ms: Option<u64>,
     pub tokens: Option<u64>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
     pub model: String,
     pub samples: u32,
     /// Cross-sample agreement on the overall score (1.0 = identical; lower = judge disagreed).
@@ -202,22 +204,42 @@ fn model_of(envelope: &Value, cfg: &EngineConfig) -> String {
         .unwrap_or_else(|| cfg.model.clone())
 }
 
-/// Run the judge with a fully-formed prompt.
-pub fn run_judge(cfg: &EngineConfig, prompt: &str) -> Result<JudgeOutcome> {
-    let schema = judge_verdict_schema().to_string();
-    let (envelope, latency_ms) = invoke(cfg, prompt, &cfg.model, None, Some(&schema))?;
-    let (input_tokens, output_tokens) = token_counts(&envelope);
+/// Parse a `[provider/]model` judge spec into (provider, model). No prefix => anthropic (claude -p).
+pub fn parse_judge_spec(spec: &str) -> (String, String) {
+    match spec.split_once('/') {
+        Some((p, m)) if !p.is_empty() && !m.is_empty() => (p.to_string(), m.to_string()),
+        _ => ("anthropic".to_string(), spec.to_string()),
+    }
+}
+
+/// Extract a JSON object from text into a Value (lenient; tolerates prose / code fences).
+fn extract_json_value(s: &str) -> Value {
+    extract_json_object(s)
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// Run the judge on the given provider/model with a fully-formed prompt. The judge is just a
+/// structured generation: we ask for JSON and parse the verdict from the model's text output.
+pub fn run_judge(
+    cfg: &EngineConfig,
+    provider: &str,
+    model: &str,
+    prompt: &str,
+) -> Result<JudgeOutcome> {
+    let g = generate(cfg, provider, model, None, prompt)?;
+    let json = extract_json_object(&g.output)
+        .ok_or_else(|| EngineError::Parse(format!("no JSON object in judge output: {}", g.output)))?;
+    let verdict: JudgeVerdict = serde_json::from_str(&json)
+        .map_err(|e| EngineError::Parse(format!("judge JSON not a verdict: {e}; got: {json}")))?;
     Ok(JudgeOutcome {
-        verdict: parse_verdict(&envelope)?,
-        cost_usd: envelope.get("total_cost_usd").and_then(Value::as_f64),
-        model: model_of(&envelope, cfg),
-        session_id: envelope
-            .get("session_id")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        latency_ms,
-        input_tokens,
-        output_tokens,
+        verdict,
+        cost_usd: g.cost_usd,
+        model: g.model,
+        session_id: None,
+        latency_ms: g.latency_ms,
+        input_tokens: g.input_tokens,
+        output_tokens: g.output_tokens,
     })
 }
 
@@ -302,24 +324,6 @@ For each dimension return {{\"score\": <0.0-1.0>, \"reasoning\": \"<one sentence
     )
 }
 
-fn structured_or_result(envelope: &Value) -> Value {
-    if let Some(s) = envelope.get("structured_output") {
-        if !s.is_null() {
-            return s.clone();
-        }
-    }
-    if let Some(r) = envelope.get("result").and_then(Value::as_str) {
-        if let (Some(start), Some(end)) = (r.find('{'), r.rfind('}')) {
-            if end > start {
-                if let Ok(v) = serde_json::from_str::<Value>(&r[start..=end]) {
-                    return v;
-                }
-            }
-        }
-    }
-    Value::Null
-}
-
 fn weighted(dims: &[(String, f64)], rubric: &Rubric) -> f64 {
     let (mut num, mut den) = (0.0, 0.0);
     for (key, score) in dims {
@@ -343,25 +347,27 @@ fn weighted(dims: &[(String, f64)], rubric: &Rubric) -> f64 {
 /// and pass/fail are computed by us (weighted dimensions + gating floors), not trusted to the model.
 pub fn run_rubric_judge(
     cfg: &EngineConfig,
+    provider: &str,
+    model: &str,
     rubric: &Rubric,
     input: &str,
     expected: Option<&str>,
     output: &str,
     samples: u32,
 ) -> Result<RubricOutcome> {
-    let schema = build_rubric_schema(rubric).to_string();
     let prompt = build_rubric_prompt(rubric, input, expected, output);
     let k = samples.max(1);
 
     let mut per_dim: HashMap<String, Vec<f64>> = HashMap::new();
     let mut reasonings: HashMap<String, String> = HashMap::new();
     let mut overalls: Vec<f64> = Vec::new();
-    let (mut total_cost, mut max_latency, mut total_tokens) = (0.0_f64, 0_u64, 0_u64);
-    let mut model = cfg.model.clone();
+    let (mut total_cost, mut any_cost, mut max_latency, mut in_tok, mut out_tok) =
+        (0.0_f64, false, 0_u64, 0_u64, 0_u64);
+    let mut model_used = model.to_string();
 
     for s in 0..k {
-        let (envelope, latency) = invoke(cfg, &prompt, &cfg.model, None, Some(&schema))?;
-        let out = structured_or_result(&envelope);
+        let g = generate(cfg, provider, model, None, &prompt)?;
+        let out = extract_json_value(&g.output);
         let mut sample: Vec<(String, f64)> = Vec::new();
         for d in &rubric.dimensions {
             let obj = out.get(&d.key);
@@ -382,13 +388,16 @@ pub fn run_rubric_judge(
             sample.push((d.key.clone(), score));
         }
         overalls.push(weighted(&sample, rubric));
-        total_cost += envelope.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0);
-        if let Some(l) = latency {
+        if let Some(c) = g.cost_usd {
+            total_cost += c;
+            any_cost = true;
+        }
+        if let Some(l) = g.latency_ms {
             max_latency = max_latency.max(l);
         }
-        let (it, ot) = token_counts(&envelope);
-        total_tokens += it.unwrap_or(0) + ot.unwrap_or(0);
-        model = model_of(&envelope, cfg);
+        in_tok += g.input_tokens.unwrap_or(0);
+        out_tok += g.output_tokens.unwrap_or(0);
+        model_used = g.model;
     }
 
     let dimensions: Vec<DimScore> = rubric
@@ -439,30 +448,15 @@ pub fn run_rubric_judge(
         dimensions,
         overall,
         pass,
-        cost_usd: Some(total_cost),
+        cost_usd: if any_cost { Some(total_cost) } else { None },
         latency_ms: Some(max_latency),
-        tokens: Some(total_tokens),
-        model,
+        tokens: Some(in_tok + out_tok),
+        input_tokens: Some(in_tok),
+        output_tokens: Some(out_tok),
+        model: model_used,
         samples: k,
         agreement,
     })
-}
-
-/// Prefer `structured_output`; otherwise extract a JSON object from the `result` text.
-fn parse_verdict(envelope: &Value) -> Result<JudgeVerdict> {
-    if let Some(s) = envelope.get("structured_output") {
-        if !s.is_null() {
-            return Ok(serde_json::from_value(s.clone())?);
-        }
-    }
-    let result = envelope
-        .get("result")
-        .and_then(Value::as_str)
-        .ok_or_else(|| EngineError::Parse("no structured_output and no result text".into()))?;
-    let json = extract_json_object(result)
-        .ok_or_else(|| EngineError::Parse(format!("no JSON object in result: {result}")))?;
-    serde_json::from_str(&json)
-        .map_err(|e| EngineError::Parse(format!("result JSON not a verdict: {e}; got: {json}")))
 }
 
 /// Extract the outermost `{...}` from a string (handles stray prose / code fences).
@@ -648,29 +642,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_structured_output() {
-        let env = serde_json::json!({
-            "total_cost_usd": 0.0004,
-            "structured_output": {"score": 0.9, "max": 1.0, "pass": true, "reasoning": "good"}
-        });
-        let v = parse_verdict(&env).unwrap();
-        assert_eq!(v.score, 0.9);
-        assert!(v.pass);
+    fn verdict_from_judge_text() {
+        // Judge output is now parsed from the model's text (provider-agnostic).
+        let text = "Here is my verdict:\n```json\n{\"score\":0.2,\"max\":1.0,\"pass\":false,\"reasoning\":\"wrong\"}\n```";
+        let json = extract_json_object(text).unwrap();
+        let v: JudgeVerdict = serde_json::from_str(&json).unwrap();
+        assert_eq!(v.score, 0.2);
+        assert!(!v.pass);
     }
 
     #[test]
-    fn falls_back_to_result_text() {
-        let env = serde_json::json!({
-            "result": "Here is my verdict:\n```json\n{\"score\":0.2,\"max\":1.0,\"pass\":false,\"reasoning\":\"wrong\"}\n```"
-        });
-        let v = parse_verdict(&env).unwrap();
-        assert_eq!(v.score, 0.2);
-        assert!(!v.pass);
+    fn rubric_json_from_text() {
+        let v = extract_json_value("noise {\"correctness\":{\"score\":0.9,\"reasoning\":\"ok\"}} tail");
+        assert_eq!(v["correctness"]["score"], 0.9);
+        assert!(extract_json_value("no json").is_null());
     }
 
     #[test]
     fn extracts_object() {
         assert_eq!(extract_json_object("noise {\"a\":1} tail"), Some("{\"a\":1}".to_string()));
         assert_eq!(extract_json_object("no json here"), None);
+    }
+
+    #[test]
+    fn judge_spec_parsing() {
+        assert_eq!(parse_judge_spec("haiku"), ("anthropic".into(), "haiku".into()));
+        assert_eq!(
+            parse_judge_spec("google/gemini-2.5-flash"),
+            ("google".into(), "gemini-2.5-flash".into())
+        );
+        assert_eq!(
+            parse_judge_spec("openai/gpt-4o-mini"),
+            ("openai".into(), "gpt-4o-mini".into())
+        );
     }
 }

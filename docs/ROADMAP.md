@@ -82,6 +82,11 @@ Evolved daily. Checked items are done; the rest is the plan we agreed on.
       (dotenvy): `GEMINI_API_KEY` / `OPENAI_API_KEY`; generation cost priced from the DB price book by tokens.
       *Verified live:* 3-way compare (claude-haiku / gemini-2.5-flash / gpt-4o-mini) — all correct on a
       capital-of-France case; gemini fastest (744ms), gpt-4o-mini cheapest gen ($0.00001).
+- [x] **Provider-configurable judge**: `judge_model` accepts `[provider/]model` (e.g. `google/gemini-2.5-flash`,
+      `openai/gpt-4o-mini`; bare name ⇒ anthropic/`claude -p`). The judge is now just a structured
+      generation parsed via `generate()`, so any provider can judge (mitigating self-preference vs the
+      generator family). Judge cost priced from the DB book when the provider returns no $.
+      *Verified live:* same answer judged by Gemini and by OpenAI (both 1.0/pass, judge cost priced).
 
 ## Phase 4 — MCP ✅
 - [x] `mcp` (`lt-mcp`): hand-rolled JSON-RPC 2.0 stdio server (no SDK); thin HTTP client of the API
