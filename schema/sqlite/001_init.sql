@@ -82,8 +82,19 @@ CREATE TABLE IF NOT EXISTS benchmarks (
   target         TEXT,         -- JSON
   dataset_ref    TEXT,
   dataset        TEXT,         -- JSON array of {input, expected?, output?}
+  rubric_id      TEXT,         -- optional structured rubric for per-dimension judging
   baseline_score REAL,
   created_at     TEXT NOT NULL
+);
+
+-- Weighted, anchored rubrics (Phase 3.6c).
+CREATE TABLE IF NOT EXISTS rubrics (
+  id          TEXT PRIMARY KEY,
+  project_id  TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  dimensions  TEXT NOT NULL,   -- JSON array of {key, description, weight, anchors, floor?}
+  threshold   REAL NOT NULL DEFAULT 0.7,
+  created_at  TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS benchmark_runs (
@@ -98,7 +109,8 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
   status          TEXT NOT NULL DEFAULT 'running',
   p50_latency_ms  INTEGER,
   p95_latency_ms  INTEGER,
-  total_tokens    INTEGER
+  total_tokens    INTEGER,
+  report          TEXT
 );
 
 -- DB-backed price book (source of truth; config/pricing.json is the seed).

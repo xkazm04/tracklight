@@ -34,7 +34,7 @@ use auth::{AuthMode, Principal};
 use lighttrack_core::{
     new_id, ApiKey, Benchmark, BenchmarkCase, BenchmarkRun, Dataset, DatasetItem, LimitAction,
     LimitMetric, LimitRule, LimitStatus, LimitWindow, LlmEvent, ModelPriceRow, PriceBook, Project,
-    Redaction, Score,
+    Redaction, Rubric, RubricDimension, Score,
 };
 use lighttrack_store::{CostRow, SqliteStore, Store, StoreError, Usage};
 
@@ -111,6 +111,11 @@ async fn main() -> anyhow::Result<()> {
             post(add_dataset_item).get(list_dataset_items),
         )
         .route("/v1/datasets/:id/freeze", post(freeze_dataset))
+        .route(
+            "/v1/projects/:id/rubrics",
+            post(create_rubric).get(list_rubrics),
+        )
+        .route("/v1/rubrics/:id", get(get_rubric))
         .route(
             "/v1/projects/:id/benchmarks",
             post(create_benchmark).get(list_benchmarks),
@@ -424,6 +429,8 @@ async fn get_scores(
 #[derive(Deserialize)]
 struct CreateBenchmarkReq {
     name: String,
+    /// Freeform rubric text (single-score mode); optional when `rubric_id` is set.
+    #[serde(default)]
     rubric: String,
     #[serde(default = "default_judge_model")]
     judge_model: String,
@@ -434,6 +441,9 @@ struct CreateBenchmarkReq {
     /// Reference a stored dataset by id instead of (or in addition to) an inline dataset.
     #[serde(default)]
     dataset_ref: Option<String>,
+    /// Optional structured rubric (id) for per-dimension judging.
+    #[serde(default)]
+    rubric_id: Option<String>,
     #[serde(default)]
     baseline_score: Option<f64>,
 }
@@ -458,6 +468,7 @@ async fn create_benchmark(
         target: req.target,
         dataset_ref: req.dataset_ref,
         dataset: req.dataset,
+        rubric_id: req.rubric_id,
         baseline_score: req.baseline_score,
         created_at: Utc::now(),
     };
@@ -702,6 +713,74 @@ async fn freeze_dataset(
     spawn_db(move || store.set_dataset_frozen(&id2, true)).await?;
     ds.frozen = true;
     Ok(Json(ds))
+}
+
+// ----------------------------------------------------------------------------
+// Rubrics (Phase 3.6c)
+// ----------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct CreateRubricReq {
+    name: String,
+    dimensions: Vec<RubricDimension>,
+    #[serde(default = "default_rubric_threshold")]
+    threshold: f64,
+}
+
+fn default_rubric_threshold() -> f64 {
+    0.7
+}
+
+async fn create_rubric(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(pid): Path<String>,
+    Json(req): Json<CreateRubricReq>,
+) -> Result<Json<Rubric>, ApiError> {
+    ensure_can_admin(&authenticate(&st, &headers).await?)?;
+    let r = Rubric {
+        id: new_id(),
+        project_id: pid,
+        name: req.name,
+        dimensions: req.dimensions,
+        threshold: req.threshold,
+        created_at: Utc::now(),
+    };
+    let store = st.store.clone();
+    let r2 = r.clone();
+    spawn_db(move || store.create_rubric(&r2)).await?;
+    Ok(Json(r))
+}
+
+async fn list_rubrics(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(pid): Path<String>,
+) -> Result<Json<Vec<Rubric>>, ApiError> {
+    let p = authenticate(&st, &headers).await?;
+    resolve_read_project(&p, Some(&pid))?;
+    let store = st.store.clone();
+    let v = spawn_db(move || store.list_rubrics(&pid)).await?;
+    Ok(Json(v))
+}
+
+async fn get_rubric(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Rubric>, ApiError> {
+    let p = authenticate(&st, &headers).await?;
+    let store = st.store.clone();
+    let id2 = id.clone();
+    let r = spawn_db(move || store.get_rubric(&id2))
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("rubric '{id}' not found")))?;
+    if let Principal::Project(pid) = &p {
+        if &r.project_id != pid {
+            return Err(ApiError::forbidden("key not authorized for that rubric"));
+        }
+    }
+    Ok(Json(r))
 }
 
 // ----------------------------------------------------------------------------

@@ -11,13 +11,17 @@
 //! Config (flags or env): --base LIGHTTRACK_URL, --key LIGHTTRACK_KEY,
 //!   --model LIGHTTRACK_JUDGE_MODEL (default haiku), --claude-bin (default claude).
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 
 use lighttrack_anon::scrub;
-use lighttrack_core::{Benchmark, BenchmarkCase, DatasetItem, LlmEvent};
-use lighttrack_engine::{build_eval_prompt, build_judge_prompt, run_judge, run_text, EngineConfig};
+use lighttrack_core::{Benchmark, BenchmarkCase, DatasetItem, LlmEvent, Rubric};
+use lighttrack_engine::{
+    build_eval_prompt, build_judge_prompt, run_judge, run_rubric_judge, run_text, EngineConfig,
+};
 
 #[derive(Parser)]
 #[command(name = "lt-runner", about = "LightTrack scoring runner (claude -p judge)")]
@@ -65,6 +69,12 @@ enum Cmd {
     Bench {
         #[arg(long)]
         benchmark: String,
+        /// Self-consistency: judge each case this many times and average (rubric mode).
+        #[arg(long, default_value_t = 1)]
+        samples: u32,
+        /// Add an LLM-generated recommendations/"healing" paragraph to the report (rubric mode).
+        #[arg(long)]
+        heal: bool,
     },
     /// Build a dataset by sampling real events and anonymizing them.
     Dataset {
@@ -116,7 +126,11 @@ fn main() -> Result<()> {
             println!("posted score: {}", serde_json::to_string_pretty(&stored)?);
             Ok(())
         }
-        Cmd::Bench { benchmark } => run_benchmark(&cli, &http, &engine, benchmark),
+        Cmd::Bench {
+            benchmark,
+            samples,
+            heal,
+        } => run_benchmark(&cli, &http, &engine, benchmark, *samples, *heal),
         Cmd::Dataset { action } => match action {
             DatasetCmd::Build {
                 project,
@@ -126,6 +140,233 @@ fn main() -> Result<()> {
             } => build_dataset(&cli, &http, &engine, project, name, *n, *llm_scrub),
         },
     }
+}
+
+/// Rubric mode: per-dimension judging (with self-consistency), aggregated into a report.
+#[allow(clippy::too_many_arguments)]
+fn run_rubric_benchmark(
+    cli: &Cli,
+    http: &reqwest::blocking::Client,
+    engine: &EngineConfig,
+    bench: &Benchmark,
+    cases: &[BenchmarkCase],
+    rubric_id: &str,
+    samples: u32,
+    heal: bool,
+) -> Result<()> {
+    let rubric: Rubric = get(cli, http, &format!("/v1/rubrics/{rubric_id}"))?;
+    let bench_engine = EngineConfig {
+        claude_bin: engine.claude_bin.clone(),
+        model: bench.judge_model.clone(),
+        bare: engine.bare,
+    };
+    println!(
+        "benchmark '{}' — {} case(s), rubric '{}' ({} dims, threshold {:.2}), judge={}, samples={}",
+        bench.name,
+        cases.len(),
+        rubric.name,
+        rubric.dimensions.len(),
+        rubric.threshold,
+        bench.judge_model,
+        samples
+    );
+
+    let mut dim_sums: HashMap<String, f64> = HashMap::new();
+    let mut overall_sum = 0.0_f64;
+    let (mut passes, mut judged, mut total_tokens) = (0u32, 0u32, 0u64);
+    let mut cost = 0.0_f64;
+    let mut latencies: Vec<u64> = Vec::new();
+    let mut min_agreement = 1.0_f64;
+    let mut failing: Vec<Value> = Vec::new();
+
+    for (i, case) in cases.iter().enumerate() {
+        let output = match &case.output {
+            Some(o) => o,
+            None => {
+                println!("  case {} skipped (no output)", i + 1);
+                continue;
+            }
+        };
+        let o = run_rubric_judge(
+            &bench_engine,
+            &rubric,
+            &case.input,
+            case.expected.as_deref(),
+            output,
+            samples,
+        )
+        .context("rubric judge (claude -p) failed")?;
+        judged += 1;
+        overall_sum += o.overall;
+        if o.pass {
+            passes += 1;
+        }
+        cost += o.cost_usd.unwrap_or(0.0);
+        if let Some(l) = o.latency_ms {
+            latencies.push(l);
+        }
+        total_tokens += o.tokens.unwrap_or(0);
+        min_agreement = min_agreement.min(o.agreement);
+        for d in &o.dimensions {
+            *dim_sums.entry(d.key.clone()).or_insert(0.0) += d.score;
+        }
+        let dim_str = o
+            .dimensions
+            .iter()
+            .map(|d| format!("{}={:.2}", d.key, d.score))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("  case {}: overall={:.2} pass={} [{dim_str}]", i + 1, o.overall, o.pass);
+        if !o.pass {
+            if let Some(w) = o.dimensions.iter().min_by(|a, b| a.score.total_cmp(&b.score)) {
+                failing.push(json!({
+                    "index": i + 1, "overall": o.overall, "weakest": w.key, "reasoning": w.reasoning
+                }));
+            }
+        }
+        let score = json!({
+            "project_id": bench.project_id,
+            "rubric": format!("bench:{}", bench.name),
+            "value": o.overall, "max": 1.0, "pass": o.pass,
+            "reasoning": format!("rubric '{}' overall over {} dims", rubric.name, o.dimensions.len()),
+            "scored_by": o.model, "cost_usd": o.cost_usd,
+        });
+        post(cli, http, "/v1/scores", &score)?;
+    }
+
+    let mean = if judged > 0 { overall_sum / judged as f64 } else { 0.0 };
+    let pass_rate = if judged > 0 { passes as f64 / judged as f64 } else { 0.0 };
+    let (p50, p95) = percentiles(&mut latencies);
+
+    let dim_means: Vec<Value> = rubric
+        .dimensions
+        .iter()
+        .map(|d| json!({ "key": d.key, "mean": dim_mean(&dim_sums, &d.key, judged), "weight": d.weight }))
+        .collect();
+    let weakest = rubric
+        .dimensions
+        .iter()
+        .map(|d| (d.key.clone(), dim_mean(&dim_sums, &d.key, judged)))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(k, _)| k);
+
+    let mut recs: Vec<String> = Vec::new();
+    if let Some(w) = &weakest {
+        recs.push(format!(
+            "Weakest dimension '{w}' (mean {:.2}); {}/{judged} cases failed.",
+            dim_mean(&dim_sums, w, judged),
+            judged - passes
+        ));
+    }
+    for d in &rubric.dimensions {
+        let m = dim_mean(&dim_sums, &d.key, judged);
+        if m < 0.6 {
+            recs.push(format!("Improve '{}' ({}): mean {m:.2} below 0.6.", d.key, d.description));
+        }
+    }
+    if samples > 1 && min_agreement < 0.8 {
+        recs.push(format!(
+            "Judge agreement dipped to {min_agreement:.2}; tighten anchors or raise --samples."
+        ));
+    }
+    recs.push(if mean >= rubric.threshold {
+        format!("Overall {mean:.2} meets threshold {:.2}.", rubric.threshold)
+    } else {
+        format!("Overall {mean:.2} is below threshold {:.2}.", rubric.threshold)
+    });
+
+    let healing = if heal {
+        let dims_txt = rubric
+            .dimensions
+            .iter()
+            .map(|d| format!("{} (w{}) mean {:.2}", d.key, d.weight, dim_mean(&dim_sums, &d.key, judged)))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let prompt = format!(
+            "You are an LLM evaluation consultant. Benchmark '{}' scored overall {mean:.2} \
+(threshold {:.2}, pass rate {:.0}%). Per-dimension means: {dims_txt}. {} of {judged} cases failed. \
+In 3-5 concise bullet points, recommend concrete fixes (prompt changes, model choice, rubric \
+clarifications) targeting the weakest dimensions. Return only the bullets.",
+            bench.name,
+            rubric.threshold,
+            pass_rate * 100.0,
+            judged - passes
+        );
+        match run_text(&bench_engine, &prompt) {
+            Ok(t) => Some(t.text.trim().to_string()),
+            Err(e) => {
+                eprintln!("healing pass failed: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let status = match bench.baseline_score {
+        Some(b) if mean + 1e-9 < b => "regressed",
+        Some(_) => "passed",
+        None => "no_baseline",
+    };
+
+    let mut report = json!({
+        "rubric": rubric.name,
+        "threshold": rubric.threshold,
+        "samples": samples,
+        "overall_mean": mean,
+        "pass_rate": pass_rate,
+        "dimensions": dim_means,
+        "weakest_dimension": weakest,
+        "failing_cases": failing,
+        "recommendations": recs,
+    });
+    if let Some(h) = &healing {
+        report["healing"] = json!(h);
+    }
+
+    println!(
+        "\nscorecard: overall={mean:.3}  pass_rate={:.0}%  cost=${cost:.5}  p50={}ms  tokens={total_tokens}  status={status}",
+        pass_rate * 100.0,
+        p50.unwrap_or(0)
+    );
+    print!("dimensions:");
+    for d in &rubric.dimensions {
+        print!("  {}={:.2}", d.key, dim_mean(&dim_sums, &d.key, judged));
+    }
+    println!();
+    if let Some(w) = &weakest {
+        println!("weakest: {w}");
+    }
+    println!("recommendations:");
+    for r in &recs {
+        println!("  - {r}");
+    }
+    if let Some(h) = &healing {
+        println!("\nhealing:\n{h}");
+    }
+
+    let run = json!({
+        "benchmark_id": bench.id,
+        "n_cases": judged,
+        "mean_score": mean,
+        "pass_rate": pass_rate,
+        "cost_usd": cost,
+        "status": status,
+        "p50_latency_ms": p50,
+        "p95_latency_ms": p95,
+        "total_tokens": total_tokens,
+        "report": report,
+    });
+    let stored = post(cli, http, "/v1/benchmark-runs", &run)?;
+    println!(
+        "\nrecorded run {}",
+        stored.get("id").and_then(|v| v.as_str()).unwrap_or("?")
+    );
+    Ok(())
+}
+
+fn dim_mean(sums: &HashMap<String, f64>, key: &str, n: u32) -> f64 {
+    sums.get(key).copied().unwrap_or(0.0) / n.max(1) as f64
 }
 
 /// Sample events, scrub PII (regex always; optional LLM pass), and freeze a dataset.
@@ -217,6 +458,8 @@ fn run_benchmark(
     http: &reqwest::blocking::Client,
     engine: &EngineConfig,
     benchmark_id: &str,
+    samples: u32,
+    heal: bool,
 ) -> Result<()> {
     let bench: Benchmark = get(cli, http, &format!("/v1/benchmarks/{benchmark_id}"))?;
 
@@ -236,6 +479,11 @@ fn run_benchmark(
     } else {
         Vec::new()
     };
+
+    // Structured rubric mode (per-dimension scoring + report) when the benchmark references a rubric.
+    if let Some(rid) = bench.rubric_id.clone() {
+        return run_rubric_benchmark(cli, http, engine, &bench, &cases, &rid, samples, heal);
+    }
 
     println!(
         "benchmark '{}' — {} case(s), judge={}, baseline={}",

@@ -11,8 +11,8 @@ use serde_json::Value;
 
 use lighttrack_core::{
     ApiKey, Benchmark, BenchmarkRun, Dataset, DatasetItem, LimitAction, LimitMetric, LimitRule,
-    LimitWindow, LlmEvent, ModelPriceRow, Operation, Project, Provider, Redaction, Score, Status,
-    TokenUsage,
+    LimitWindow, LlmEvent, ModelPriceRow, Operation, Project, Provider, Redaction, Rubric, Score,
+    Status, TokenUsage,
 };
 
 use crate::{CostRow, Result, Store, StoreError, Usage};
@@ -27,10 +27,12 @@ const SCORE_COLS: &str = "id, project_id, event_id, rubric, value, max, pass, re
     scored_by, cost_usd, created_at";
 
 const BENCH_COLS: &str = "id, project_id, name, rubric, judge_model, target, dataset_ref, \
-    dataset, baseline_score, created_at";
+    dataset, rubric_id, baseline_score, created_at";
 
 const RUN_COLS: &str = "id, benchmark_id, started_at, finished_at, n_cases, mean_score, \
-    pass_rate, cost_usd, status, p50_latency_ms, p95_latency_ms, total_tokens";
+    pass_rate, cost_usd, status, p50_latency_ms, p95_latency_ms, total_tokens, report";
+
+const RUBRIC_COLS: &str = "id, project_id, name, dimensions, threshold, created_at";
 
 const PRICE_COLS: &str = "provider, model, input_per_mtok, output_per_mtok, \
     cached_input_per_mtok, effective_date, source_url";
@@ -393,8 +395,8 @@ impl Store for SqliteStore {
         let dataset = serde_json::to_string(&b.dataset)?;
         conn.execute(
             "INSERT INTO benchmarks \
-             (id, project_id, name, rubric, judge_model, target, dataset_ref, dataset, baseline_score, created_at) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+             (id, project_id, name, rubric, judge_model, target, dataset_ref, dataset, rubric_id, baseline_score, created_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 b.id,
                 b.project_id,
@@ -404,6 +406,7 @@ impl Store for SqliteStore {
                 target,
                 b.dataset_ref,
                 dataset,
+                b.rubric_id,
                 b.baseline_score,
                 fmt_ts(b.created_at),
             ],
@@ -433,11 +436,16 @@ impl Store for SqliteStore {
 
     fn create_benchmark_run(&self, r: &BenchmarkRun) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        let report = if r.report.is_null() {
+            None
+        } else {
+            Some(serde_json::to_string(&r.report)?)
+        };
         conn.execute(
             "INSERT INTO benchmark_runs \
              (id, benchmark_id, started_at, finished_at, n_cases, mean_score, pass_rate, cost_usd, status, \
-              p50_latency_ms, p95_latency_ms, total_tokens) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+              p50_latency_ms, p95_latency_ms, total_tokens, report) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![
                 r.id,
                 r.benchmark_id,
@@ -451,6 +459,7 @@ impl Store for SqliteStore {
                 r.p50_latency_ms.map(|v| v as i64),
                 r.p95_latency_ms.map(|v| v as i64),
                 r.total_tokens.map(|v| v as i64),
+                report,
             ],
         )?;
         Ok(())
@@ -584,6 +593,37 @@ impl Store for SqliteStore {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         raws.into_iter().map(item_from_raw).collect()
     }
+
+    fn create_rubric(&self, r: &Rubric) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let dims = serde_json::to_string(&r.dimensions)?;
+        conn.execute(
+            "INSERT INTO rubrics (id, project_id, name, dimensions, threshold, created_at) \
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![r.id, r.project_id, r.name, dims, r.threshold, fmt_ts(r.created_at)],
+        )?;
+        Ok(())
+    }
+
+    fn get_rubric(&self, id: &str) -> Result<Option<Rubric>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("SELECT {RUBRIC_COLS} FROM rubrics WHERE id = ?1");
+        let mut stmt = conn.prepare(&sql)?;
+        let raw = stmt.query_row(params![id], map_rubric_raw).optional()?;
+        raw.map(rubric_from_raw).transpose()
+    }
+
+    fn list_rubrics(&self, project: &str) -> Result<Vec<Rubric>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {RUBRIC_COLS} FROM rubrics WHERE project_id = ?1 ORDER BY created_at DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let raws = stmt
+            .query_map(params![project], map_rubric_raw)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        raws.into_iter().map(rubric_from_raw).collect()
+    }
 }
 
 // --- row mappers / converters for the Phase 2 tables ---
@@ -702,13 +742,14 @@ fn score_from_raw(r: ScoreRaw) -> Result<Score> {
     })
 }
 
-// id, project_id, name, rubric, judge_model, target, dataset_ref, dataset, baseline_score, created_at
+// id, project_id, name, rubric, judge_model, target, dataset_ref, dataset, rubric_id, baseline_score, created_at
 type BenchRaw = (
     String,
     String,
     String,
     String,
     String,
+    Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -728,6 +769,7 @@ fn map_bench_raw(row: &Row) -> rusqlite::Result<BenchRaw> {
         row.get(7)?,
         row.get(8)?,
         row.get(9)?,
+        row.get(10)?,
     ))
 }
 
@@ -749,13 +791,14 @@ fn bench_from_raw(r: BenchRaw) -> Result<Benchmark> {
         target,
         dataset_ref: r.6,
         dataset,
-        baseline_score: r.8,
-        created_at: parse_ts(&r.9)?,
+        rubric_id: r.8,
+        baseline_score: r.9,
+        created_at: parse_ts(&r.10)?,
     })
 }
 
 // id, benchmark_id, started_at, finished_at, n_cases, mean_score, pass_rate, cost_usd, status,
-// p50_latency_ms, p95_latency_ms, total_tokens
+// p50_latency_ms, p95_latency_ms, total_tokens, report
 type RunRaw = (
     String,
     String,
@@ -769,6 +812,7 @@ type RunRaw = (
     Option<i64>,
     Option<i64>,
     Option<i64>,
+    Option<String>,
 );
 
 fn map_run_raw(row: &Row) -> rusqlite::Result<RunRaw> {
@@ -785,6 +829,7 @@ fn map_run_raw(row: &Row) -> rusqlite::Result<RunRaw> {
         row.get(9)?,
         row.get(10)?,
         row.get(11)?,
+        row.get(12)?,
     ))
 }
 
@@ -805,6 +850,35 @@ fn run_from_raw(r: RunRaw) -> Result<BenchmarkRun> {
         p50_latency_ms: r.9.map(|v| v as u64),
         p95_latency_ms: r.10.map(|v| v as u64),
         total_tokens: r.11.map(|v| v as u64),
+        report: match r.12 {
+            Some(s) => serde_json::from_str(&s)?,
+            None => Value::Null,
+        },
+    })
+}
+
+// id, project_id, name, dimensions, threshold, created_at
+type RubricRaw = (String, String, String, String, f64, String);
+
+fn map_rubric_raw(row: &Row) -> rusqlite::Result<RubricRaw> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+    ))
+}
+
+fn rubric_from_raw(r: RubricRaw) -> Result<Rubric> {
+    Ok(Rubric {
+        id: r.0,
+        project_id: r.1,
+        name: r.2,
+        dimensions: serde_json::from_str(&r.3)?,
+        threshold: r.4,
+        created_at: parse_ts(&r.5)?,
     })
 }
 

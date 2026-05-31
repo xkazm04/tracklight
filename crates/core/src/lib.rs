@@ -10,10 +10,12 @@ pub mod event;
 pub mod limits;
 pub mod pricing;
 pub mod project;
+pub mod rubric;
 pub mod score;
 
 pub use dataset::{Dataset, DatasetItem};
 pub use error::LtError;
+pub use rubric::{Rubric, RubricDimension};
 pub use event::{LlmEvent, Operation, Provider, Status, TokenUsage};
 pub use limits::{LimitAction, LimitMetric, LimitRule, LimitStatus, LimitWindow};
 pub use pricing::{ModelPrice, ModelPriceRow, PriceBook};

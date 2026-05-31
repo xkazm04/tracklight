@@ -89,6 +89,9 @@ pub struct Benchmark {
     /// Reference to an external case dataset (path/URI/table), if not inlined in `dataset`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset_ref: Option<String>,
+    /// Optional structured rubric (id) for per-dimension judging; falls back to `rubric` text if unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rubric_id: Option<String>,
     /// Inline dataset of cases.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dataset: Vec<BenchmarkCase>,
@@ -131,6 +134,9 @@ pub struct BenchmarkRun {
     pub p95_latency_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
+    /// Phase 3.6c: per-dimension breakdown + recommendations/healing for this run.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub report: Value,
 }
 
 fn default_run_status() -> String {

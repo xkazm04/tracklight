@@ -56,8 +56,18 @@ CREATE TABLE IF NOT EXISTS `${DATASET}.benchmarks` (
   target         JSON,
   dataset_ref    STRING,
   dataset        JSON,         -- array of {input, expected?, output?}
+  rubric_id      STRING,
   baseline_score FLOAT64,
   created_at     TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS `${DATASET}.rubrics` (
+  id          STRING NOT NULL,
+  project_id  STRING NOT NULL,
+  name        STRING NOT NULL,
+  dimensions  JSON NOT NULL,
+  threshold   FLOAT64,
+  created_at  TIMESTAMP NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS `${DATASET}.benchmark_runs` (
@@ -72,7 +82,8 @@ CREATE TABLE IF NOT EXISTS `${DATASET}.benchmark_runs` (
   status         STRING,
   p50_latency_ms INT64,
   p95_latency_ms INT64,
-  total_tokens   INT64
+  total_tokens   INT64,
+  report         JSON
 );
 
 CREATE TABLE IF NOT EXISTS `${DATASET}.model_prices` (

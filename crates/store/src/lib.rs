@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use lighttrack_core::{
     ApiKey, Benchmark, BenchmarkRun, Dataset, DatasetItem, LimitRule, LlmEvent, ModelPriceRow,
-    Project, Score,
+    Project, Rubric, Score,
 };
 
 pub use sqlite::SqliteStore;
@@ -109,4 +109,9 @@ pub trait Store: Send + Sync {
     fn set_dataset_frozen(&self, id: &str, frozen: bool) -> Result<()>;
     fn create_dataset_item(&self, item: &DatasetItem) -> Result<()>;
     fn list_dataset_items(&self, dataset_id: &str) -> Result<Vec<DatasetItem>>;
+
+    // --- rubrics (Phase 3.6c) ---
+    fn create_rubric(&self, r: &Rubric) -> Result<()>;
+    fn get_rubric(&self, id: &str) -> Result<Option<Rubric>>;
+    fn list_rubrics(&self, project: &str) -> Result<Vec<Rubric>>;
 }

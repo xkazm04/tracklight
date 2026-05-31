@@ -8,13 +8,14 @@
 //! (falling back to extracting a JSON object from the `result` text if a build doesn't return
 //! `structured_output`). The judge is **unbudgeted** by design — callers never rate-limit it.
 
+use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use thiserror::Error;
 
-use lighttrack_core::{judge_verdict_schema, JudgeVerdict};
+use lighttrack_core::{judge_verdict_schema, JudgeVerdict, Rubric};
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -75,6 +76,30 @@ pub struct TextOutcome {
     pub cost_usd: Option<f64>,
     pub model: String,
     pub latency_ms: Option<u64>,
+}
+
+/// One dimension's aggregated score within a rubric judgement.
+#[derive(Debug, Clone)]
+pub struct DimScore {
+    pub key: String,
+    pub score: f64,
+    pub reasoning: String,
+    pub weight: f64,
+}
+
+/// The result of judging one case against a [`Rubric`] (possibly averaged over k samples).
+#[derive(Debug, Clone)]
+pub struct RubricOutcome {
+    pub dimensions: Vec<DimScore>,
+    pub overall: f64,
+    pub pass: bool,
+    pub cost_usd: Option<f64>,
+    pub latency_ms: Option<u64>,
+    pub tokens: Option<u64>,
+    pub model: String,
+    pub samples: u32,
+    /// Cross-sample agreement on the overall score (1.0 = identical; lower = judge disagreed).
+    pub agreement: f64,
 }
 
 /// Build a judging prompt for an input/output pair against a rubric.
@@ -198,6 +223,217 @@ pub fn run_text(cfg: &EngineConfig, prompt: &str) -> Result<TextOutcome> {
         cost_usd: envelope.get("total_cost_usd").and_then(Value::as_f64),
         model: model_of(&envelope, cfg),
         latency_ms,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Rubric judging (Phase 3.6c)
+// ---------------------------------------------------------------------------
+
+/// Build a JSON schema keyed by dimension: each dimension yields `{score, reasoning}`.
+pub fn build_rubric_schema(rubric: &Rubric) -> Value {
+    let mut props = Map::new();
+    let mut required = Vec::new();
+    for d in &rubric.dimensions {
+        props.insert(
+            d.key.clone(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "score": { "type": "number", "description": format!("0.0-1.0 — {}", d.description) },
+                    "reasoning": { "type": "string" }
+                },
+                "required": ["score", "reasoning"],
+                "additionalProperties": false
+            }),
+        );
+        required.push(Value::String(d.key.clone()));
+    }
+    let mut root = Map::new();
+    root.insert("type".into(), json!("object"));
+    root.insert("properties".into(), Value::Object(props));
+    root.insert("required".into(), Value::Array(required));
+    root.insert("additionalProperties".into(), json!(false));
+    Value::Object(root)
+}
+
+/// RCAF judge prompt for a rubric: Role, Context (dimensions+anchors+reference), Action, Format.
+pub fn build_rubric_prompt(
+    rubric: &Rubric,
+    input: &str,
+    expected: Option<&str>,
+    output: &str,
+) -> String {
+    let dims = rubric
+        .dimensions
+        .iter()
+        .map(|d| {
+            let anchors = if d.anchors.is_empty() {
+                String::new()
+            } else {
+                format!(" Anchors: {}", d.anchors.join("; "))
+            };
+            format!("- {} (weight {}): {}.{}", d.key, d.weight, d.description, anchors)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let reference = expected
+        .map(|e| format!("\n=== REFERENCE / EXPECTED ===\n{e}\n"))
+        .unwrap_or_default();
+    format!(
+        "You are an impartial, strict evaluation judge. Score the ASSISTANT OUTPUT on EACH dimension \
+below from 0.0 to 1.0 using the anchors. Penalize unnecessary length; do not reward verbosity. Judge \
+only the output's quality for the input{ref_note}; ignore which model produced it.\n\n\
+Dimensions:\n{dims}\n\n\
+For each dimension return {{\"score\": <0.0-1.0>, \"reasoning\": \"<one sentence>\"}}.\n\n\
+=== USER INPUT ===\n{input}\n{reference}\n=== ASSISTANT OUTPUT ===\n{output}\n",
+        ref_note = if expected.is_some() { " and the reference" } else { "" }
+    )
+}
+
+fn structured_or_result(envelope: &Value) -> Value {
+    if let Some(s) = envelope.get("structured_output") {
+        if !s.is_null() {
+            return s.clone();
+        }
+    }
+    if let Some(r) = envelope.get("result").and_then(Value::as_str) {
+        if let (Some(start), Some(end)) = (r.find('{'), r.rfind('}')) {
+            if end > start {
+                if let Ok(v) = serde_json::from_str::<Value>(&r[start..=end]) {
+                    return v;
+                }
+            }
+        }
+    }
+    Value::Null
+}
+
+fn weighted(dims: &[(String, f64)], rubric: &Rubric) -> f64 {
+    let (mut num, mut den) = (0.0, 0.0);
+    for (key, score) in dims {
+        let w = rubric
+            .dimensions
+            .iter()
+            .find(|d| &d.key == key)
+            .map(|d| d.weight)
+            .unwrap_or(1.0);
+        num += score * w;
+        den += w;
+    }
+    if den > 0.0 {
+        num / den
+    } else {
+        0.0
+    }
+}
+
+/// Judge one case against a rubric, averaging over `samples` (self-consistency). The overall score
+/// and pass/fail are computed by us (weighted dimensions + gating floors), not trusted to the model.
+pub fn run_rubric_judge(
+    cfg: &EngineConfig,
+    rubric: &Rubric,
+    input: &str,
+    expected: Option<&str>,
+    output: &str,
+    samples: u32,
+) -> Result<RubricOutcome> {
+    let schema = build_rubric_schema(rubric).to_string();
+    let prompt = build_rubric_prompt(rubric, input, expected, output);
+    let k = samples.max(1);
+
+    let mut per_dim: HashMap<String, Vec<f64>> = HashMap::new();
+    let mut reasonings: HashMap<String, String> = HashMap::new();
+    let mut overalls: Vec<f64> = Vec::new();
+    let (mut total_cost, mut max_latency, mut total_tokens) = (0.0_f64, 0_u64, 0_u64);
+    let mut model = cfg.model.clone();
+
+    for s in 0..k {
+        let (envelope, latency) = invoke(cfg, &prompt, Some(&schema))?;
+        let out = structured_or_result(&envelope);
+        let mut sample: Vec<(String, f64)> = Vec::new();
+        for d in &rubric.dimensions {
+            let obj = out.get(&d.key);
+            let score = obj
+                .and_then(|o| o.get("score"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            let reasoning = obj
+                .and_then(|o| o.get("reasoning"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            per_dim.entry(d.key.clone()).or_default().push(score);
+            if s == 0 {
+                reasonings.insert(d.key.clone(), reasoning);
+            }
+            sample.push((d.key.clone(), score));
+        }
+        overalls.push(weighted(&sample, rubric));
+        total_cost += envelope.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0);
+        if let Some(l) = latency {
+            max_latency = max_latency.max(l);
+        }
+        let (it, ot) = token_counts(&envelope);
+        total_tokens += it.unwrap_or(0) + ot.unwrap_or(0);
+        model = model_of(&envelope, cfg);
+    }
+
+    let dimensions: Vec<DimScore> = rubric
+        .dimensions
+        .iter()
+        .map(|d| {
+            let v = per_dim.get(&d.key).cloned().unwrap_or_default();
+            let mean = if v.is_empty() {
+                0.0
+            } else {
+                v.iter().sum::<f64>() / v.len() as f64
+            };
+            DimScore {
+                key: d.key.clone(),
+                score: mean,
+                reasoning: reasonings.get(&d.key).cloned().unwrap_or_default(),
+                weight: d.weight,
+            }
+        })
+        .collect();
+
+    let overall = {
+        let den: f64 = dimensions.iter().map(|d| d.weight).sum();
+        if den > 0.0 {
+            dimensions.iter().map(|d| d.score * d.weight).sum::<f64>() / den
+        } else {
+            0.0
+        }
+    };
+    let pass = overall >= rubric.threshold
+        && rubric.dimensions.iter().all(|d| {
+            let s = dimensions
+                .iter()
+                .find(|x| x.key == d.key)
+                .map(|x| x.score)
+                .unwrap_or(0.0);
+            d.floor.map_or(true, |f| s >= f)
+        });
+    let agreement = if k > 1 {
+        let max = overalls.iter().cloned().fold(f64::MIN, f64::max);
+        let min = overalls.iter().cloned().fold(f64::MAX, f64::min);
+        (1.0 - (max - min)).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+
+    Ok(RubricOutcome {
+        dimensions,
+        overall,
+        pass,
+        cost_usd: Some(total_cost),
+        latency_ms: Some(max_latency),
+        tokens: Some(total_tokens),
+        model,
+        samples: k,
+        agreement,
     })
 }
 

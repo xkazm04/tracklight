@@ -55,7 +55,13 @@ Evolved daily. Checked items are done; the rest is the plan we agreed on.
       `claude -p` pass for names/free-text); benchmarks can run a stored dataset via `dataset_ref`.
       *Verified:* 2 PII events → frozen dataset, 9 redactions (EMAIL/PHONE/CC/IP/IBAN/SSN/SECRET), no
       raw PII; frozen→409; benchmark resolved cases from the dataset and scored them.
-- [ ] 3.6c Golden-standard rubric methodology (weighted anchored dimensions) + report & healing
+- [x] 3.6c Golden-standard rubric methodology: `rubrics` (weighted anchored dimensions + gating floors,
+      pass threshold) + API CRUD; engine builds a per-dimension JSON schema (RCAF prompt, verbosity/
+      self-preference guards) and computes weighted overall + pass itself; self-consistency (`--samples`
+      k-vote agreement); `lt-runner bench` rubric mode → per-dimension scorecard + run `report`
+      (dimension means, weakest dimension, failing-case clustering, recommendations, optional `--heal`
+      LLM paragraph). *Verified:* good answer 1.0/pass, fragmented answer 0.56/fail (completeness 0.35),
+      weakest=completeness, report + recommendations stored.
 - [ ] 3.6d Async benchmark job queue (jobs table + `lt-runner serve`)
 - [ ] 3.6e Multi-provider generation (Claude via `claude -p` now; OpenAI/Gemini when keyed)
 
