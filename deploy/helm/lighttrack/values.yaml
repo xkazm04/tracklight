@@ -1,0 +1,49 @@
+# LightTrack Helm values. Override with -f my-values.yaml or --set.
+# UNVERIFIED template (authored without a local helm to lint) — run `helm lint` / `helm template`
+# before installing.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/xkazm04/tracklight
+  tag: "v0.0.1"
+  pullPolicy: IfNotPresent
+
+# imagePullSecrets: [{ name: ghcr-creds }]   # if the GHCR package is private
+
+config:
+  authMode: enforced          # "enforced" (recommended) or "dev"
+  bind: "0.0.0.0:8787"
+  dbPath: /data/lighttrack.db  # SQLite path; used only when secrets.databaseUrl is empty
+
+secrets:
+  adminKey: ""                 # REQUIRED for authMode=enforced (a strong random string)
+  databaseUrl: ""              # postgres://... (Phase 5a). Empty => SQLite at config.dbPath.
+
+# Keep SQLite across restarts. Not needed when databaseUrl points at Postgres.
+persistence:
+  enabled: false
+  size: 1Gi
+  # storageClass: ""
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8787
+
+ingress:
+  enabled: false
+  className: ""
+  host: lighttrack.example.com
+  annotations: {}
+  tls: false
+  # tlsSecretName: lighttrack-tls
+
+resources: {}
+  # limits:   { cpu: 500m, memory: 256Mi }
+  # requests: { cpu: 100m, memory: 128Mi }
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}

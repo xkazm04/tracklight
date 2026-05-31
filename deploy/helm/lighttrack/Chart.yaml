@@ -1,0 +1,9 @@
+apiVersion: v2
+name: lighttrack
+description: LightTrack — self-hosted LLM observability + scoring (API service). Runs on any k8s (GKE/AKS/EKS).
+type: application
+version: 0.1.0
+appVersion: "0.0.1"
+home: https://github.com/xkazm04/tracklight
+sources:
+  - https://github.com/xkazm04/tracklight

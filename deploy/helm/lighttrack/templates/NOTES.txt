@@ -1,0 +1,26 @@
+LightTrack ({{ include "lighttrack.fullname" . }}) is installed.
+
+{{- if .Values.ingress.enabled }}
+URL:  http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}/health
+{{- else }}
+Port-forward to reach it:
+  kubectl port-forward svc/{{ include "lighttrack.fullname" . }} 8787:{{ .Values.service.port }}
+  curl http://127.0.0.1:8787/health
+{{- end }}
+
+{{- if eq .Values.config.authMode "enforced" }}
+{{- if not .Values.secrets.adminKey }}
+
+WARNING: authMode=enforced but secrets.adminKey is empty — management endpoints will 401.
+Set it:  helm upgrade ... --set secrets.adminKey=<strong-random>
+{{- end }}
+{{- end }}
+
+{{- if and (not .Values.secrets.databaseUrl) (not .Values.persistence.enabled) }}
+
+NOTE: using ephemeral SQLite (no databaseUrl, persistence disabled) — data is lost on pod restart.
+Set secrets.databaseUrl to a Postgres DSN (Phase 5a) or persistence.enabled=true for durability.
+{{- end }}
+
+The lt-runner judge/queue worker runs OUTSIDE the cluster (it needs the `claude` CLI + provider keys):
+  lt-runner --base <service-url> --key <admin-or-project-key> serve --interval 10
