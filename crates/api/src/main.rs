@@ -40,7 +40,7 @@ use lighttrack_store::{CostRow, SqliteStore, Store, StoreError, Usage};
 
 #[derive(Clone)]
 struct AppState {
-    store: Arc<SqliteStore>,
+    store: Arc<dyn Store + Send + Sync>,
     /// DB-backed price book, hot-swappable via `PUT /v1/prices/:provider/:model`.
     prices: Arc<RwLock<PriceBook>>,
     auth_mode: AuthMode,
@@ -57,26 +57,49 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .filter(|s| !s.is_empty());
 
-    let store = Arc::new(SqliteStore::open(&db)?);
+    // Backend selection: LIGHTTRACK_DATABASE_URL=postgres://... → Postgres; else SQLite at LIGHTTRACK_DB.
+    let database_url = std::env::var("LIGHTTRACK_DATABASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let backend = if database_url.as_deref().is_some_and(|u| u.starts_with("postgres")) {
+        "postgres"
+    } else {
+        "sqlite"
+    };
 
-    // Seed the DB price book from pricing.json on first run; thereafter the DB is the source of truth.
-    if store.list_prices()?.is_empty() {
-        let seed = match std::fs::read_to_string(&pricing) {
-            Ok(s) => PriceBook::from_json_str(&s).unwrap_or_else(|e| {
-                eprintln!("pricing parse error: {e}; seeding empty");
-                PriceBook::default()
-            }),
-            Err(_) => {
-                eprintln!("pricing file '{pricing}' not found; seeding empty");
-                PriceBook::default()
+    // The Postgres store calls `block_on` internally, which panics if run on the async main thread.
+    // Do the connect + seeding on a blocking thread; the request handlers already use spawn_blocking.
+    let (store, book) = tokio::task::spawn_blocking(
+        move || -> anyhow::Result<(Arc<dyn Store + Send + Sync>, PriceBook)> {
+            let store: Arc<dyn Store + Send + Sync> = match &database_url {
+                Some(url) if url.starts_with("postgres") => {
+                    Arc::new(lighttrack_store_pg::PgStore::connect(url)?)
+                }
+                _ => Arc::new(SqliteStore::open(&db)?),
+            };
+
+            // Seed the price book from pricing.json on first run; thereafter the DB is the source of truth.
+            if store.list_prices()?.is_empty() {
+                let seed = match std::fs::read_to_string(&pricing) {
+                    Ok(s) => PriceBook::from_json_str(&s).unwrap_or_else(|e| {
+                        eprintln!("pricing parse error: {e}; seeding empty");
+                        PriceBook::default()
+                    }),
+                    Err(_) => {
+                        eprintln!("pricing file '{pricing}' not found; seeding empty");
+                        PriceBook::default()
+                    }
+                };
+                for row in seed.rows() {
+                    store.upsert_price(&row)?;
+                }
+                eprintln!("seeded {} model prices into the DB", seed.len());
             }
-        };
-        for row in seed.rows() {
-            store.upsert_price(&row)?;
-        }
-        eprintln!("seeded {} model prices into the DB", seed.len());
-    }
-    let book = PriceBook::from_rows(&store.list_prices()?);
+            let book = PriceBook::from_rows(&store.list_prices()?);
+            Ok((store, book))
+        },
+    )
+    .await??;
     let n_prices = book.len();
 
     let state = AppState {
@@ -87,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     println!(
-        "lighttrack-api v{} on http://{bind}  (db={db}, {n_prices} priced models, auth={:?}, admin_key={})",
+        "lighttrack-api v{} on http://{bind}  (store={backend}, {n_prices} priced models, auth={:?}, admin_key={})",
         env!("CARGO_PKG_VERSION"),
         state.auth_mode,
         if state.admin_key.is_some() { "set" } else { "unset" },

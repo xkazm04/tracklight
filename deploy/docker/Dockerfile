@@ -7,6 +7,10 @@
 # ---- builder -------------------------------------------------------------
 FROM rust:1-bookworm AS builder
 WORKDIR /src
+# sqlx (Postgres backend) uses native-tls => OpenSSL on Linux.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libssl-dev pkg-config \
+ && rm -rf /var/lib/apt/lists/*
 # `schema/` is include_str!'d at compile time, so the whole workspace is needed.
 # .dockerignore keeps target/.git/etc. out of the context.
 COPY . .
@@ -15,7 +19,7 @@ RUN cargo build --release --bins
 # ---- runtime -------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl \
+ && apt-get install -y --no-install-recommends ca-certificates curl libssl3 \
  && rm -rf /var/lib/apt/lists/* \
  && useradd -r -u 10001 -d /app -m lighttrack \
  && mkdir -p /data && chown lighttrack:lighttrack /data

@@ -1,0 +1,16 @@
+[package]
+name = "lighttrack-store-pg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LightTrack Postgres backend (sqlx) implementing the Store trait — the universal cloud DB."
+
+[dependencies]
+lighttrack-core.workspace = true
+lighttrack-store = { path = "../store" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+# native-tls => SChannel on Windows / system TLS elsewhere (cloud Postgres like Neon needs TLS).
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-native-tls", "postgres"] }
