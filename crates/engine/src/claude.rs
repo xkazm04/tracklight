@@ -15,6 +15,10 @@ pub(crate) fn invoke(
     system_prompt: Option<&str>,
     schema: Option<&str>,
 ) -> Result<(Value, Option<u64>)> {
+    // A trailing `@<effort>` on the model selects the CLI reasoning effort
+    // (low|medium|high|xhigh|max), e.g. "opus@xhigh" — lets the judge reason deeply while candidate
+    // generations stay at their default. No suffix ⇒ the model runs as-is.
+    let (model, effort) = split_effort(model);
     let mut cmd = Command::new(&cfg.claude_bin);
     cmd.arg("-p")
         .arg(prompt)
@@ -23,6 +27,9 @@ pub(crate) fn invoke(
         .arg("--model")
         .arg(model)
         .stdin(Stdio::null()); // don't block waiting for piped stdin
+    if let Some(level) = effort {
+        cmd.arg("--effort").arg(level);
+    }
     if let Some(sys) = system_prompt {
         cmd.arg("--append-system-prompt").arg(sys);
     }
@@ -63,6 +70,17 @@ pub(crate) fn token_counts(envelope: &Value) -> (Option<u64>, Option<u64>) {
     });
     let output = usage.and_then(|u| u.get("output_tokens").and_then(Value::as_u64));
     (input, output)
+}
+
+/// Split a trailing `@<effort>` (low|medium|high|xhigh|max) off a model spec, e.g.
+/// "opus@xhigh" → ("opus", Some("xhigh")). Any other string → (model, None).
+fn split_effort(model: &str) -> (&str, Option<&str>) {
+    if let Some((m, e)) = model.rsplit_once('@') {
+        if matches!(e, "low" | "medium" | "high" | "xhigh" | "max") {
+            return (m, Some(e));
+        }
+    }
+    (model, None)
 }
 
 /// Resolve the model name reported in the envelope, falling back to `fallback`.
