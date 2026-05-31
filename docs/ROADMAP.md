@@ -43,6 +43,16 @@ Evolved daily. Checked items are done; the rest is the plan we agreed on.
 - [x] `mcp`: `list_benchmarks`, `get_benchmark_runs` tools
 - [x] Verified live: 3-case `capitals-qa` (2 correct, 1 wrong) → mean 0.667, `regressed` vs 0.9 baseline; run + 3 scores stored; surfaced via MCP
 
+## Phase 3.6 — Benchmark framework hardening (design: docs/BENCHMARK_FRAMEWORK.md)
+- [x] 3.6a Cost foundation: DB-backed `model_prices` (seeded with official 2026-05-31 rates) +
+      `GET /v1/prices` + `PUT /v1/prices/:provider/:model` (live hot-swap, no restart); judge latency +
+      tokens captured in the engine; runs record p50/p95 latency, total tokens, cost.
+      *Verified:* live price update $1→$2 mid-run; run stored p50=8511ms, tokens=123742.
+- [ ] 3.6b Datasets from real events + hybrid (regex + optional LLM) anonymization
+- [ ] 3.6c Golden-standard rubric methodology (weighted anchored dimensions) + report & healing
+- [ ] 3.6d Async benchmark job queue (jobs table + `lt-runner serve`)
+- [ ] 3.6e Multi-provider generation (Claude via `claude -p` now; OpenAI/Gemini when keyed)
+
 ## Phase 4 — MCP ✅
 - [x] `mcp` (`lt-mcp`): hand-rolled JSON-RPC 2.0 stdio server (no SDK); thin HTTP client of the API
 - [x] Tools: `list_projects`, `get_cost_summary`, `query_events`, `get_limit_status`, `list_scores`

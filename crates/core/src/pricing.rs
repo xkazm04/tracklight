@@ -1,9 +1,25 @@
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{LtError, Result};
 use crate::event::{Provider, TokenUsage};
+
+/// A persisted price-book row (the DB-backed source of truth; `pricing.json` is just the seed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelPriceRow {
+    pub provider: String,
+    pub model: String,
+    pub input_per_mtok: f64,
+    pub output_per_mtok: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_per_mtok: Option<f64>,
+    #[serde(default = "Utc::now")]
+    pub effective_date: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+}
 
 /// Per-model price, in USD per 1,000,000 tokens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +57,43 @@ impl PriceBook {
 
     pub fn key(provider: Provider, model: &str) -> String {
         format!("{}/{}", provider.as_str(), model)
+    }
+
+    /// Build a price book from persisted rows (keyed `"<provider>/<model>"`).
+    pub fn from_rows(rows: &[ModelPriceRow]) -> Self {
+        let entries = rows
+            .iter()
+            .map(|r| {
+                (
+                    format!("{}/{}", r.provider, r.model),
+                    ModelPrice {
+                        input_per_mtok: r.input_per_mtok,
+                        output_per_mtok: r.output_per_mtok,
+                        cached_input_per_mtok: r.cached_input_per_mtok,
+                    },
+                )
+            })
+            .collect();
+        Self { entries }
+    }
+
+    /// Flatten this book into rows (for seeding the DB from `pricing.json`).
+    pub fn rows(&self) -> Vec<ModelPriceRow> {
+        self.entries
+            .iter()
+            .filter_map(|(k, v)| {
+                let (provider, model) = k.split_once('/')?;
+                Some(ModelPriceRow {
+                    provider: provider.to_string(),
+                    model: model.to_string(),
+                    input_per_mtok: v.input_per_mtok,
+                    output_per_mtok: v.output_per_mtok,
+                    cached_input_per_mtok: v.cached_input_per_mtok,
+                    effective_date: Utc::now(),
+                    source_url: None,
+                })
+            })
+            .collect()
     }
 
     /// Look up a price, trying an exact `provider/model` match first, then a date-suffix-trimmed

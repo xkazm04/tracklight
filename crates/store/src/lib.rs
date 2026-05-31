@@ -13,7 +13,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use lighttrack_core::{
-    ApiKey, Benchmark, BenchmarkRun, LimitRule, LlmEvent, Project, Score,
+    ApiKey, Benchmark, BenchmarkRun, LimitRule, LlmEvent, ModelPriceRow, Project, Score,
 };
 
 pub use sqlite::SqliteStore;
@@ -96,4 +96,8 @@ pub trait Store: Send + Sync {
     fn list_benchmarks(&self, project: &str) -> Result<Vec<Benchmark>>;
     fn create_benchmark_run(&self, r: &BenchmarkRun) -> Result<()>;
     fn list_benchmark_runs(&self, benchmark_id: &str) -> Result<Vec<BenchmarkRun>>;
+
+    // --- model prices (Phase 3.6a) ---
+    fn upsert_price(&self, p: &ModelPriceRow) -> Result<()>;
+    fn list_prices(&self) -> Result<Vec<ModelPriceRow>>;
 }

@@ -124,6 +124,13 @@ pub struct BenchmarkRun {
     /// `running` | `passed` | `regressed` | `failed`.
     #[serde(default = "default_run_status")]
     pub status: String,
+    // Phase 3.6a: response-time + token aggregates for the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p50_latency_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p95_latency_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
 }
 
 fn default_run_status() -> String {

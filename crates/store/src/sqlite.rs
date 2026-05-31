@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use lighttrack_core::{
     ApiKey, Benchmark, BenchmarkRun, LimitAction, LimitMetric, LimitRule, LimitWindow, LlmEvent,
-    Operation, Project, Provider, Redaction, Score, Status, TokenUsage,
+    ModelPriceRow, Operation, Project, Provider, Redaction, Score, Status, TokenUsage,
 };
 
 use crate::{CostRow, Result, Store, StoreError, Usage};
@@ -29,7 +29,10 @@ const BENCH_COLS: &str = "id, project_id, name, rubric, judge_model, target, dat
     dataset, baseline_score, created_at";
 
 const RUN_COLS: &str = "id, benchmark_id, started_at, finished_at, n_cases, mean_score, \
-    pass_rate, cost_usd, status";
+    pass_rate, cost_usd, status, p50_latency_ms, p95_latency_ms, total_tokens";
+
+const PRICE_COLS: &str = "provider, model, input_per_mtok, output_per_mtok, \
+    cached_input_per_mtok, effective_date, source_url";
 
 /// Fixed-width, UTC, nanosecond RFC3339 (e.g. `2026-05-31T00:07:14.110948400Z`).
 /// Fixed width => lexicographic ordering matches chronological ordering, so `ts` range
@@ -426,8 +429,9 @@ impl Store for SqliteStore {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO benchmark_runs \
-             (id, benchmark_id, started_at, finished_at, n_cases, mean_score, pass_rate, cost_usd, status) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+             (id, benchmark_id, started_at, finished_at, n_cases, mean_score, pass_rate, cost_usd, status, \
+              p50_latency_ms, p95_latency_ms, total_tokens) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 r.id,
                 r.benchmark_id,
@@ -438,6 +442,9 @@ impl Store for SqliteStore {
                 r.pass_rate,
                 r.cost_usd,
                 r.status,
+                r.p50_latency_ms.map(|v| v as i64),
+                r.p95_latency_ms.map(|v| v as i64),
+                r.total_tokens.map(|v| v as i64),
             ],
         )?;
         Ok(())
@@ -453,6 +460,39 @@ impl Store for SqliteStore {
             .query_map(params![benchmark_id], map_run_raw)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         raws.into_iter().map(run_from_raw).collect()
+    }
+
+    fn upsert_price(&self, p: &ModelPriceRow) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO model_prices \
+             (provider, model, input_per_mtok, output_per_mtok, cached_input_per_mtok, effective_date, source_url) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7) \
+             ON CONFLICT(provider, model) DO UPDATE SET \
+               input_per_mtok=excluded.input_per_mtok, output_per_mtok=excluded.output_per_mtok, \
+               cached_input_per_mtok=excluded.cached_input_per_mtok, \
+               effective_date=excluded.effective_date, source_url=excluded.source_url",
+            params![
+                p.provider,
+                p.model,
+                p.input_per_mtok,
+                p.output_per_mtok,
+                p.cached_input_per_mtok,
+                fmt_ts(p.effective_date),
+                p.source_url,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn list_prices(&self) -> Result<Vec<ModelPriceRow>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("SELECT {PRICE_COLS} FROM model_prices ORDER BY provider, model");
+        let mut stmt = conn.prepare(&sql)?;
+        let raws = stmt
+            .query_map([], map_price_raw)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        raws.into_iter().map(price_from_raw).collect()
     }
 }
 
@@ -624,7 +664,8 @@ fn bench_from_raw(r: BenchRaw) -> Result<Benchmark> {
     })
 }
 
-// id, benchmark_id, started_at, finished_at, n_cases, mean_score, pass_rate, cost_usd, status
+// id, benchmark_id, started_at, finished_at, n_cases, mean_score, pass_rate, cost_usd, status,
+// p50_latency_ms, p95_latency_ms, total_tokens
 type RunRaw = (
     String,
     String,
@@ -635,6 +676,9 @@ type RunRaw = (
     Option<f64>,
     f64,
     String,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
 );
 
 fn map_run_raw(row: &Row) -> rusqlite::Result<RunRaw> {
@@ -648,6 +692,9 @@ fn map_run_raw(row: &Row) -> rusqlite::Result<RunRaw> {
         row.get(6)?,
         row.get(7)?,
         row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
     ))
 }
 
@@ -665,6 +712,36 @@ fn run_from_raw(r: RunRaw) -> Result<BenchmarkRun> {
         pass_rate: r.6,
         cost_usd: r.7,
         status: r.8,
+        p50_latency_ms: r.9.map(|v| v as u64),
+        p95_latency_ms: r.10.map(|v| v as u64),
+        total_tokens: r.11.map(|v| v as u64),
+    })
+}
+
+// provider, model, input_per_mtok, output_per_mtok, cached_input_per_mtok, effective_date, source_url
+type PriceRaw = (String, String, f64, f64, Option<f64>, String, Option<String>);
+
+fn map_price_raw(row: &Row) -> rusqlite::Result<PriceRaw> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+    ))
+}
+
+fn price_from_raw(r: PriceRaw) -> Result<ModelPriceRow> {
+    Ok(ModelPriceRow {
+        provider: r.0,
+        model: r.1,
+        input_per_mtok: r.2,
+        output_per_mtok: r.3,
+        cached_input_per_mtok: r.4,
+        effective_date: parse_ts(&r.5)?,
+        source_url: r.6,
     })
 }
 

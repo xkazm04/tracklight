@@ -9,6 +9,7 @@
 //! `structured_output`). The judge is **unbudgeted** by design — callers never rate-limit it.
 
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use serde_json::Value;
 use thiserror::Error;
@@ -60,6 +61,11 @@ pub struct JudgeOutcome {
     pub cost_usd: Option<f64>,
     pub model: String,
     pub session_id: Option<String>,
+    /// Wall-clock latency of the `claude -p` call.
+    pub latency_ms: Option<u64>,
+    /// Total input tokens (prompt + cache read + cache creation), if reported.
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
 }
 
 /// Build a judging prompt for an input/output pair against a rubric.
@@ -111,10 +117,12 @@ pub fn run_judge(cfg: &EngineConfig, prompt: &str) -> Result<JudgeOutcome> {
     if cfg.bare {
         cmd.arg("--bare");
     }
+    let started = Instant::now();
     let output = cmd.output().map_err(|source| EngineError::Spawn {
         bin: cfg.claude_bin.clone(),
         source,
     })?;
+    let latency_ms = Some(started.elapsed().as_millis() as u64);
 
     if !output.status.success() {
         return Err(EngineError::NonZero {
@@ -142,11 +150,21 @@ pub fn run_judge(cfg: &EngineConfig, prompt: &str) -> Result<JudgeOutcome> {
         .map(str::to_string)
         .unwrap_or_else(|| cfg.model.clone());
 
+    let usage = envelope.get("usage");
+    let input_tokens = usage.map(|u| {
+        let f = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+        f("input_tokens") + f("cache_read_input_tokens") + f("cache_creation_input_tokens")
+    });
+    let output_tokens = usage.and_then(|u| u.get("output_tokens").and_then(Value::as_u64));
+
     Ok(JudgeOutcome {
         verdict,
         cost_usd,
         model,
         session_id,
+        latency_ms,
+        input_tokens,
+        output_tokens,
     })
 }
 

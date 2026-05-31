@@ -61,15 +61,28 @@ CREATE TABLE IF NOT EXISTS `${DATASET}.benchmarks` (
 );
 
 CREATE TABLE IF NOT EXISTS `${DATASET}.benchmark_runs` (
-  id           STRING NOT NULL,
-  benchmark_id STRING NOT NULL,
-  started_at   TIMESTAMP NOT NULL,
-  finished_at  TIMESTAMP,
-  n_cases      INT64,
-  mean_score   FLOAT64,
-  pass_rate    FLOAT64,
-  cost_usd     FLOAT64,
-  status       STRING
+  id             STRING NOT NULL,
+  benchmark_id   STRING NOT NULL,
+  started_at     TIMESTAMP NOT NULL,
+  finished_at    TIMESTAMP,
+  n_cases        INT64,
+  mean_score     FLOAT64,
+  pass_rate      FLOAT64,
+  cost_usd       FLOAT64,
+  status         STRING,
+  p50_latency_ms INT64,
+  p95_latency_ms INT64,
+  total_tokens   INT64
+);
+
+CREATE TABLE IF NOT EXISTS `${DATASET}.model_prices` (
+  provider              STRING NOT NULL,
+  model                 STRING NOT NULL,
+  input_per_mtok        FLOAT64 NOT NULL,
+  output_per_mtok       FLOAT64 NOT NULL,
+  cached_input_per_mtok FLOAT64,
+  effective_date        TIMESTAMP NOT NULL,
+  source_url            STRING
 );
 
 -- Example free-tier-friendly rollup the notifier / Looker Studio can use:

@@ -14,7 +14,7 @@ pub mod score;
 pub use error::LtError;
 pub use event::{LlmEvent, Operation, Provider, Status, TokenUsage};
 pub use limits::{LimitAction, LimitMetric, LimitRule, LimitStatus, LimitWindow};
-pub use pricing::{ModelPrice, PriceBook};
+pub use pricing::{ModelPrice, ModelPriceRow, PriceBook};
 pub use project::{ApiKey, Project, Redaction};
 pub use score::{
     judge_verdict_schema, Benchmark, BenchmarkCase, BenchmarkRun, JudgeVerdict, Score,

@@ -87,13 +87,28 @@ CREATE TABLE IF NOT EXISTS benchmarks (
 );
 
 CREATE TABLE IF NOT EXISTS benchmark_runs (
-  id           TEXT PRIMARY KEY,
-  benchmark_id TEXT NOT NULL REFERENCES benchmarks(id),
-  started_at   TEXT NOT NULL,
-  finished_at  TEXT,
-  n_cases      INTEGER NOT NULL DEFAULT 0,
-  mean_score   REAL,
-  pass_rate    REAL,
-  cost_usd     REAL,
-  status       TEXT NOT NULL DEFAULT 'running'
+  id              TEXT PRIMARY KEY,
+  benchmark_id    TEXT NOT NULL REFERENCES benchmarks(id),
+  started_at      TEXT NOT NULL,
+  finished_at     TEXT,
+  n_cases         INTEGER NOT NULL DEFAULT 0,
+  mean_score      REAL,
+  pass_rate       REAL,
+  cost_usd        REAL,
+  status          TEXT NOT NULL DEFAULT 'running',
+  p50_latency_ms  INTEGER,
+  p95_latency_ms  INTEGER,
+  total_tokens    INTEGER
+);
+
+-- DB-backed price book (source of truth; config/pricing.json is the seed).
+CREATE TABLE IF NOT EXISTS model_prices (
+  provider              TEXT NOT NULL,
+  model                 TEXT NOT NULL,
+  input_per_mtok        REAL NOT NULL,
+  output_per_mtok       REAL NOT NULL,
+  cached_input_per_mtok REAL,
+  effective_date        TEXT NOT NULL,
+  source_url            TEXT,
+  PRIMARY KEY (provider, model)
 );

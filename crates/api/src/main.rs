@@ -18,13 +18,13 @@
 mod auth;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
@@ -33,14 +33,15 @@ use serde::{Deserialize, Serialize};
 use auth::{AuthMode, Principal};
 use lighttrack_core::{
     new_id, ApiKey, Benchmark, BenchmarkCase, BenchmarkRun, LimitAction, LimitMetric, LimitRule,
-    LimitStatus, LimitWindow, LlmEvent, PriceBook, Project, Redaction, Score,
+    LimitStatus, LimitWindow, LlmEvent, ModelPriceRow, PriceBook, Project, Redaction, Score,
 };
 use lighttrack_store::{CostRow, SqliteStore, Store, StoreError, Usage};
 
 #[derive(Clone)]
 struct AppState {
     store: Arc<SqliteStore>,
-    prices: Arc<PriceBook>,
+    /// DB-backed price book, hot-swappable via `PUT /v1/prices/:provider/:model`.
+    prices: Arc<RwLock<PriceBook>>,
     auth_mode: AuthMode,
     admin_key: Option<String>,
 }
@@ -55,28 +56,38 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .filter(|s| !s.is_empty());
 
-    let prices = match std::fs::read_to_string(&pricing) {
-        Ok(s) => PriceBook::from_json_str(&s).unwrap_or_else(|e| {
-            eprintln!("pricing parse error: {e}; using empty book");
-            PriceBook::default()
-        }),
-        Err(_) => {
-            eprintln!("pricing file '{pricing}' not found; using empty book");
-            PriceBook::default()
+    let store = Arc::new(SqliteStore::open(&db)?);
+
+    // Seed the DB price book from pricing.json on first run; thereafter the DB is the source of truth.
+    if store.list_prices()?.is_empty() {
+        let seed = match std::fs::read_to_string(&pricing) {
+            Ok(s) => PriceBook::from_json_str(&s).unwrap_or_else(|e| {
+                eprintln!("pricing parse error: {e}; seeding empty");
+                PriceBook::default()
+            }),
+            Err(_) => {
+                eprintln!("pricing file '{pricing}' not found; seeding empty");
+                PriceBook::default()
+            }
+        };
+        for row in seed.rows() {
+            store.upsert_price(&row)?;
         }
-    };
+        eprintln!("seeded {} model prices into the DB", seed.len());
+    }
+    let book = PriceBook::from_rows(&store.list_prices()?);
+    let n_prices = book.len();
 
     let state = AppState {
-        store: Arc::new(SqliteStore::open(&db)?),
-        prices: Arc::new(prices),
+        store,
+        prices: Arc::new(RwLock::new(book)),
         auth_mode,
         admin_key,
     };
 
     println!(
-        "lighttrack-api v{} on http://{bind}  (db={db}, {} priced models, auth={:?}, admin_key={})",
+        "lighttrack-api v{} on http://{bind}  (db={db}, {n_prices} priced models, auth={:?}, admin_key={})",
         env!("CARGO_PKG_VERSION"),
-        state.prices.len(),
         state.auth_mode,
         if state.admin_key.is_some() { "set" } else { "unset" },
     );
@@ -87,6 +98,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/events/:id", get(get_event_by_id))
         .route("/v1/costs", get(get_costs))
         .route("/v1/scores", post(post_score).get(get_scores))
+        .route("/v1/prices", get(get_prices))
+        .route("/v1/prices/:provider/:model", put(put_price))
         .route(
             "/v1/projects/:id/benchmarks",
             post(create_benchmark).get(list_benchmarks),
@@ -273,7 +286,10 @@ async fn post_event(
     let principal = authenticate(&st, &headers).await?;
     let pid = resolve_ingest_project(&principal, &ev.project_id)?;
     ev.project_id = pid.clone();
-    ev.ensure_cost(st.prices.as_ref());
+    {
+        let book = st.prices.read().unwrap();
+        ev.ensure_cost(&book);
+    }
 
     let store = st.store.clone();
     let to_insert = ev.clone();
@@ -500,6 +516,60 @@ async fn post_benchmark_run(
     let run2 = run.clone();
     spawn_db(move || store.create_benchmark_run(&run2)).await?;
     Ok(Json(run))
+}
+
+// ----------------------------------------------------------------------------
+// Model prices (Phase 3.6a) — DB-backed, hot-swappable
+// ----------------------------------------------------------------------------
+
+async fn get_prices(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ModelPriceRow>>, ApiError> {
+    authenticate(&st, &headers).await?;
+    let store = st.store.clone();
+    let rows = spawn_db(move || store.list_prices()).await?;
+    Ok(Json(rows))
+}
+
+#[derive(Deserialize)]
+struct PutPriceReq {
+    input_per_mtok: f64,
+    output_per_mtok: f64,
+    #[serde(default)]
+    cached_input_per_mtok: Option<f64>,
+    #[serde(default)]
+    source_url: Option<String>,
+}
+
+async fn put_price(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path((provider, model)): Path<(String, String)>,
+    Json(req): Json<PutPriceReq>,
+) -> Result<Json<ModelPriceRow>, ApiError> {
+    ensure_can_admin(&authenticate(&st, &headers).await?)?;
+    let row = ModelPriceRow {
+        provider,
+        model,
+        input_per_mtok: req.input_per_mtok,
+        output_per_mtok: req.output_per_mtok,
+        cached_input_per_mtok: req.cached_input_per_mtok,
+        effective_date: Utc::now(),
+        source_url: req.source_url,
+    };
+    let store = st.store.clone();
+    let row2 = row.clone();
+    spawn_db(move || store.upsert_price(&row2)).await?;
+
+    // Hot-swap the in-memory price book so new prices take effect without a restart.
+    let store2 = st.store.clone();
+    let rows = spawn_db(move || store2.list_prices()).await?;
+    {
+        let mut book = st.prices.write().unwrap();
+        *book = PriceBook::from_rows(&rows);
+    }
+    Ok(Json(row))
 }
 
 // ----------------------------------------------------------------------------

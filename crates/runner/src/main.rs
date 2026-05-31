@@ -124,6 +124,8 @@ fn run_benchmark(
     };
 
     let (mut sum, mut n, mut passes, mut cost) = (0.0_f64, 0u32, 0u32, 0.0_f64);
+    let mut latencies: Vec<u64> = Vec::new();
+    let mut total_tokens: u64 = 0;
     for (i, case) in bench.dataset.iter().enumerate() {
         let output = match &case.output {
             Some(o) => o,
@@ -145,11 +147,16 @@ fn run_benchmark(
             passes += 1;
         }
         cost += outcome.cost_usd.unwrap_or(0.0);
+        if let Some(l) = outcome.latency_ms {
+            latencies.push(l);
+        }
+        total_tokens += outcome.input_tokens.unwrap_or(0) + outcome.output_tokens.unwrap_or(0);
         println!(
-            "  case {}: score={:.2} pass={} :: {}",
+            "  case {}: score={:.2} pass={} {}ms :: {}",
             i + 1,
             norm,
             outcome.verdict.pass,
+            outcome.latency_ms.unwrap_or(0),
             outcome.verdict.reasoning
         );
         // Persist each case score under a bench-scoped rubric.
@@ -168,6 +175,7 @@ fn run_benchmark(
 
     let mean = if n > 0 { sum / n as f64 } else { 0.0 };
     let pass_rate = if n > 0 { passes as f64 / n as f64 } else { 0.0 };
+    let (p50, p95) = percentiles(&mut latencies);
     let status = match bench.baseline_score {
         Some(b) if mean + 1e-9 < b => "regressed",
         Some(_) => "passed",
@@ -175,8 +183,10 @@ fn run_benchmark(
     };
 
     println!(
-        "\nscorecard: mean={mean:.3}  pass_rate={:.0}%  cost=${cost:.5}  status={status}",
-        pass_rate * 100.0
+        "\nscorecard: mean={mean:.3}  pass_rate={:.0}%  cost=${cost:.5}  p50={}ms p95={}ms  tokens={total_tokens}  status={status}",
+        pass_rate * 100.0,
+        p50.unwrap_or(0),
+        p95.unwrap_or(0),
     );
     if let Some(b) = bench.baseline_score {
         println!(
@@ -196,6 +206,9 @@ fn run_benchmark(
         "pass_rate": pass_rate,
         "cost_usd": cost,
         "status": status,
+        "p50_latency_ms": p50,
+        "p95_latency_ms": p95,
+        "total_tokens": total_tokens,
     });
     let stored = post(cli, http, "/v1/benchmark-runs", &run)?;
     println!(
@@ -277,6 +290,19 @@ fn build_score(
         "scored_by": outcome.model,
         "cost_usd": outcome.cost_usd,
     })
+}
+
+/// p50/p95 of a latency sample (nearest-rank). Returns (None, None) if empty.
+fn percentiles(latencies: &mut [u64]) -> (Option<u64>, Option<u64>) {
+    if latencies.is_empty() {
+        return (None, None);
+    }
+    latencies.sort_unstable();
+    let pick = |p: f64| {
+        let idx = (((latencies.len() - 1) as f64) * p).round() as usize;
+        latencies[idx.min(latencies.len() - 1)]
+    };
+    (Some(pick(0.50)), Some(pick(0.95)))
 }
 
 /// Resolve a runnable claude executable. A child process can't invoke the npm `.cmd`/`.ps1`
