@@ -67,3 +67,7 @@ those for *what* and *why*; this file is *how we write the code*.
   providers that return no `$` is priced from the book by tokens.
 - Store timestamps are fixed-width `RFC3339(Nanos, Z)` so string range filters / `ORDER BY` are correct.
 - MCP server (`lt-mcp`): all diagnostics to **stderr** — stdout is the JSON-RPC protocol channel.
+  Read tools are side-effect-free (annotated `readOnlyHint`); **write tools stay gated behind
+  `LIGHTTRACK_MCP_ALLOW_WRITES` (default off)** on top of the API's admin-key checks. Don't expose
+  secret-minting (API keys) over MCP — it would leak into agent context. The server is a thin HTTP
+  client only: never give it direct DB access.
