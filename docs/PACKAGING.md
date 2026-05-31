@@ -33,6 +33,7 @@ Status: **design**. Reframes/extends the original GCP-only Phase 5. Proposes Pha
 |---|---|---|---|
 | Local-lite | **SQLite** *(shipped)*, DuckDB, libSQL/**Turso** | `SqliteStore` / `SqlStore` / `DuckStore` | SQLite done |
 | Universal OLTP | **Postgres** (RDS / Cloud SQL / Azure DB / **Neon** / **Supabase**), MySQL | `SqlStore` (sqlx) | proposed 5a |
+| GCP-native config | **Firestore** | `FirestoreStore` | full-scope (kept) |
 | Analytical (scale) | BigQuery, ClickHouse, Athena/Redshift, Snowflake | `EventSink` (optional) | optional |
 | Lakehouse (neutral) | Parquet/Iceberg on S3 / GCS / Azure Blob | via `object_store` / `opendal` | optional |
 
@@ -152,7 +153,7 @@ isn't tied to one vendor. Metabase/Superset are drop-in alternatives.
 The original cloud decisions were GCP-specific. The multicloud pivot:
 | Original (D2/D3) | Proposed (multicloud) |
 |---|---|
-| Config/OLTP store = Firestore | **Postgres** (universal; SQLite local) |
+| Config/OLTP store = Firestore (only) | **Postgres** default (universal); **Firestore kept** as the GCP-native option; SQLite local |
 | Analytical store = BigQuery (required) | BigQuery = **optional** `EventSink`; Postgres suffices small-scale |
 | Dashboards = Looker Studio (GCP) | add **Grafana** (neutral) alongside |
 | Compute = Cloud Run | **any serverless container** (Cloud Run / App Runner / Container Apps) |
@@ -189,7 +190,8 @@ crates/store/src/{sqlite.rs,sql.rs,bigquery.rs}   # adapters behind the Store tr
 ```
 
 ## 11. Open decisions (confirm before 5a)
-1. **Drop Firestore for Postgres** as the universal config/OLTP store? *(recommended)*
+1. **Postgres as the cross-cloud default** config/OLTP store, with **Firestore kept** as the GCP-native
+   option (full-scope requirement — both supported behind the `Store` trait). *(confirmed)*
 2. **Query layer:** `sqlx` (raw SQL, compile-checked, lightweight — recommended) vs SeaORM/Diesel (ORM).
 3. **IaC tool:** Terraform vs **OpenTofu** (OSS, license-clean — recommended) vs Pulumi (no Rust SDK).
 4. **Analytical sink in v1** (BigQuery/ClickHouse `EventSink`) or defer until scale demands it?
