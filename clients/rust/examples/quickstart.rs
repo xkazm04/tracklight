@@ -4,7 +4,7 @@
 //!     cargo run --example quickstart                         # dev mode: project "demo"
 //!     LIGHTTRACK_KEY=lt_... cargo run --example quickstart   # enforced: project from the key
 
-use lighttrack_client::{Client, Provider};
+use lighttrack_client::{Client, GuardRules, Provider};
 use serde_json::json;
 
 fn main() {
@@ -32,6 +32,11 @@ fn main() {
     let openai_resp = json!({"model": "gpt-4o", "usage": {"prompt_tokens": 10, "completion_tokens": 5}});
     lt.track_openai_json(&openai_resp, None);
 
+    // Inline output guardrail: validate a model output + record the verdict as a score.
+    let rules = GuardRules { json_keys: vec!["merchant".into(), "total".into()], no_pii: true, ..Default::default() };
+    let verdict = lt.track_guard("{\"merchant\":\"Acme\",\"total\":12.5}", &rules, Some("extract"));
+    println!("guard ok={} violations={:?}", verdict.ok, verdict.violations);
+
     lt.flush(); // drain + join the background worker
-    println!("sent 3 events — check: GET /v1/events and /v1/costs");
+    println!("sent 3 events + 1 guard score — check: GET /v1/events, /v1/scores, /v1/costs");
 }

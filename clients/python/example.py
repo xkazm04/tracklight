@@ -11,7 +11,7 @@ Uses fake provider response objects, so it runs with no real provider SDK or API
 import os
 import types
 
-from lighttrack import LightTrack
+from lighttrack import LightTrack, guard
 
 
 def fake_openai_response():
@@ -46,8 +46,15 @@ def main():
 
         # Low-level generic call.
         lt.track("openai", "gpt-4o", input_tokens=10, output_tokens=5, operation="chat")
+
+        # Inline output guardrails: `guard` is pure (returns a verdict); `track_guard` also records
+        # the verdict as a score so guardrail pass-rates are observable.
+        print("guard:", guard('{"a":1}', {"json_keys": ["a", "b"]}).violations)  # -> missing 'b'
+        verdict = lt.track_guard('{"merchant":"Acme","total":12.5}',
+                                 {"json_keys": ["merchant", "total"], "no_pii": True}, name="extract")
+        print("track_guard ok:", verdict.ok)
         lt.flush()
-    print("sent 5 events — check: GET /v1/events and /v1/costs")
+    print("sent 5 events + 1 guard score — check: GET /v1/events, /v1/scores, /v1/costs")
 
 
 if __name__ == "__main__":

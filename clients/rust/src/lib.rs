@@ -30,7 +30,7 @@ const DEFAULT_URL: &str = "http://127.0.0.1:8787";
 pub struct Client {
     project: Option<String>,
     source: Option<String>,
-    tx: Option<Sender<LlmEvent>>,
+    tx: Option<Sender<(&'static str, Value)>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -48,7 +48,7 @@ impl Client {
     /// admin key ingesting into a specific project.
     pub fn new(base_url: impl Into<String>, api_key: Option<String>, project: Option<String>) -> Self {
         let base = base_url.into().trim_end_matches('/').to_string();
-        let (tx, rx) = mpsc::channel::<LlmEvent>();
+        let (tx, rx) = mpsc::channel::<(&'static str, Value)>();
         let worker = std::thread::Builder::new()
             .name("lighttrack".into())
             .spawn(move || {
@@ -56,9 +56,10 @@ impl Client {
                     .timeout(Duration::from_secs(2))
                     .build()
                     .unwrap_or_else(|_| reqwest::blocking::Client::new());
-                // Receives until all senders drop; delivers queued events first, so Drop drains.
-                while let Ok(ev) = rx.recv() {
-                    let mut req = http.post(format!("{base}/v1/events")).json(&ev);
+                // Receives (path, body) until all senders drop; delivers queued items first, so Drop
+                // drains. `path` is /v1/events for calls and /v1/scores for guard verdicts.
+                while let Ok((path, body)) = rx.recv() {
+                    let mut req = http.post(format!("{base}{path}")).json(&body);
                     if let Some(k) = &api_key {
                         req = req.bearer_auth(k);
                     }
@@ -82,9 +83,44 @@ impl Client {
 
     /// Low-level: enqueue a fully-built event (best-effort, non-blocking).
     pub fn track(&self, ev: LlmEvent) {
+        self.send_raw("/v1/events", serde_json::to_value(&ev).unwrap_or(Value::Null));
+    }
+
+    /// Enqueue a pre-serialized body to an API path (best-effort, non-blocking).
+    fn send_raw(&self, path: &'static str, body: Value) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(ev);
+            let _ = tx.send((path, body));
         }
+    }
+
+    /// Validate `output` against [`GuardRules`] and record the verdict as a score (best-effort,
+    /// non-blocking) so guardrail pass-rates are observable. Returns the verdict so the caller can
+    /// act (retry / fallback / block). Never blocks or panics.
+    pub fn track_guard(&self, output: &str, rules: &GuardRules, name: Option<&str>) -> GuardResult {
+        let result = guard(output, rules);
+        let score = lighttrack_core::Score {
+            id: lighttrack_core::new_id(),
+            project_id: self.project.clone().unwrap_or_default(),
+            event_id: None,
+            rubric: name.map(|n| format!("guard:{n}")).unwrap_or_else(|| "guard".into()),
+            value: if result.ok { 1.0 } else { 0.0 },
+            max: 1.0,
+            pass: Some(result.ok),
+            reasoning: Some(if result.violations.is_empty() {
+                "all checks passed".to_string()
+            } else {
+                result.violations.join("; ")
+            }),
+            scored_by: self
+                .source
+                .clone()
+                .map(|s| format!("guard:{s}"))
+                .unwrap_or_else(|| "lighttrack-guard".into()),
+            cost_usd: None,
+            created_at: chrono::Utc::now(),
+        };
+        self.send_raw("/v1/scores", serde_json::to_value(&score).unwrap_or(Value::Null));
+        result
     }
 
     /// Track from an OpenAI chat/responses JSON value (extracts model + token usage).
@@ -227,5 +263,149 @@ impl<'a> EventBuilder<'a> {
     /// Enqueue the event (best-effort, non-blocking).
     pub fn send(self) {
         self.client.track(self.ev);
+    }
+}
+
+// ---- Output guardrails ------------------------------------------------------
+
+/// Deterministic, network-free output validation rules. Build with `..Default::default()`:
+/// `GuardRules { json: true, json_keys: vec!["id".into()], no_pii: true, ..Default::default() }`.
+#[derive(Default, Clone)]
+pub struct GuardRules {
+    /// Output must parse as JSON.
+    pub json: bool,
+    /// Required top-level JSON keys (implies `json`).
+    pub json_keys: Vec<String>,
+    pub max_words: Option<usize>,
+    pub min_words: Option<usize>,
+    pub max_chars: Option<usize>,
+    /// Substrings that must all appear.
+    pub must_include: Vec<String>,
+    /// Output must match this regex pattern.
+    pub must_match: Option<String>,
+    /// Regex patterns the output must NOT match (banned content / patterns).
+    pub must_not_match: Vec<String>,
+    /// Reject common PII (email, phone, credit-card-like, SSN).
+    pub no_pii: bool,
+}
+
+/// Verdict from [`guard`]. `ok` is true iff `violations` is empty; `checks` lists each rule's result.
+#[derive(Debug, Clone)]
+pub struct GuardResult {
+    pub ok: bool,
+    pub violations: Vec<String>,
+    pub checks: Vec<(String, bool)>,
+}
+
+const PII_PATTERNS: [(&str, &str); 4] = [
+    ("email", r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
+    ("phone", r"(?:\+?\d[\s().-]?){10,}"),
+    ("credit_card", r"\b(?:\d[ -]?){13,16}\b"),
+    ("ssn", r"\b\d{3}-\d{2}-\d{4}\b"),
+];
+
+/// Deterministic, network-free output validation — runs inline in the request path. Pure: returns a
+/// verdict; the caller decides what to do (retry / fallback / block). Mirrors the TS/Python `guard`.
+pub fn guard(output: &str, rules: &GuardRules) -> GuardResult {
+    let mut violations: Vec<String> = Vec::new();
+    let mut checks: Vec<(String, bool)> = Vec::new();
+    let mut record = |key: String, passed: bool, msg: String| {
+        checks.push((key, passed));
+        if !passed {
+            violations.push(msg);
+        }
+    };
+
+    let want_json = rules.json || !rules.json_keys.is_empty();
+    let mut parsed: Option<Value> = None;
+    if want_json {
+        match serde_json::from_str::<Value>(output.trim()) {
+            Ok(v) => {
+                parsed = Some(v);
+                record("json".into(), true, String::new());
+            }
+            Err(_) => record("json".into(), false, "output is not valid JSON".into()),
+        }
+    }
+    if let Some(obj) = parsed.as_ref().and_then(|v| v.as_object()) {
+        for k in &rules.json_keys {
+            record(format!("key:{k}"), obj.contains_key(k), format!("missing required JSON key '{k}'"));
+        }
+    } else if !rules.json_keys.is_empty() && parsed.is_some() {
+        // parsed but not an object: required keys cannot be satisfied
+        for k in &rules.json_keys {
+            record(format!("key:{k}"), false, format!("missing required JSON key '{k}'"));
+        }
+    }
+
+    let words = output.split_whitespace().count();
+    if let Some(mw) = rules.max_words {
+        record("max_words".into(), words <= mw, format!("too long: {words} words > {mw}"));
+    }
+    if let Some(mnw) = rules.min_words {
+        record("min_words".into(), words >= mnw, format!("too short: {words} words < {mnw}"));
+    }
+    if let Some(mc) = rules.max_chars {
+        let n = output.len();
+        record("max_chars".into(), n <= mc, format!("too long: {n} chars > {mc}"));
+    }
+    for s in &rules.must_include {
+        record(format!("include:{s}"), output.contains(s.as_str()), format!("must include \"{s}\""));
+    }
+    if let Some(pat) = &rules.must_match {
+        match regex::Regex::new(pat) {
+            Ok(re) => record("must_match".into(), re.is_match(output), format!("must match {pat}")),
+            Err(_) => record("must_match".into(), false, format!("invalid pattern: {pat}")),
+        }
+    }
+    for pat in &rules.must_not_match {
+        match regex::Regex::new(pat) {
+            Ok(re) => record(format!("not_match:{pat}"), !re.is_match(output), format!("must not match {pat}")),
+            Err(_) => record(format!("not_match:{pat}"), false, format!("invalid pattern: {pat}")),
+        }
+    }
+    if rules.no_pii {
+        let mut clean = true;
+        for (name, pat) in PII_PATTERNS {
+            if let Ok(re) = regex::Regex::new(pat) {
+                if re.is_match(output) {
+                    clean = false;
+                    record(format!("pii:{name}"), false, format!("contains {name}-like PII"));
+                }
+            }
+        }
+        if clean {
+            record("no_pii".into(), true, String::new());
+        }
+    }
+
+    GuardResult { ok: violations.is_empty(), violations, checks }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guard_catches_violations() {
+        let r = guard("{\"a\":1}", &GuardRules { json_keys: vec!["a".into(), "b".into()], ..Default::default() });
+        assert!(!r.ok);
+        assert!(r.violations.iter().any(|v| v.contains("'b'")));
+
+        let r = guard("one two three four five", &GuardRules { max_words: Some(3), ..Default::default() });
+        assert!(!r.ok);
+
+        let r = guard("reach me at alice@example.com", &GuardRules { no_pii: true, ..Default::default() });
+        assert!(!r.ok);
+        assert!(r.violations.iter().any(|v| v.contains("email")));
+    }
+
+    #[test]
+    fn guard_passes_valid() {
+        let r = guard(
+            "{\"merchant\":\"X\",\"total\":1.5}",
+            &GuardRules { json_keys: vec!["merchant".into(), "total".into()], max_chars: Some(200), no_pii: true, ..Default::default() },
+        );
+        assert!(r.ok, "violations: {:?}", r.violations);
     }
 }

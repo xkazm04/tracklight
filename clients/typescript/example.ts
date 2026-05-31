@@ -9,7 +9,7 @@
  * Uses fake provider response objects, so it runs with no real provider SDK or API key.
  */
 
-import { LightTrack } from "./src/index.ts";
+import { LightTrack, guard } from "./src/index.ts";
 
 const fakeOpenAI = {
   model: "gpt-4o-mini",
@@ -39,8 +39,14 @@ async function main() {
 
   lt.track("openai", "gpt-4o", { inputTokens: 10, outputTokens: 5, operation: "chat" });
 
+  // Inline output guardrails: `guard` is pure (returns a verdict); `trackGuard` also records the
+  // verdict as a score so guardrail pass-rates are observable.
+  console.log("guard:", guard('{"a":1}', { jsonKeys: ["a", "b"] }).violations); // -> missing 'b'
+  const verdict = lt.trackGuard('{"merchant":"Acme","total":12.5}', { jsonKeys: ["merchant", "total"], noPII: true }, { name: "extract" });
+  console.log("trackGuard ok:", verdict.ok);
+
   await lt.flush();
-  console.log("sent 5 events — check: GET /v1/events and /v1/costs");
+  console.log("sent 5 events + 1 guard score — check: GET /v1/events, /v1/scores, /v1/costs");
 }
 
 main();

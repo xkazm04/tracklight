@@ -11,7 +11,7 @@ See `lighttrack.client` for the API. Quick start:
     lt.close()                             # flush on shutdown (also auto-runs at exit)
 """
 
-from .client import LightTrack, Span
+from .client import GuardResult, LightTrack, Span, guard
 
-__all__ = ["LightTrack", "Span"]
+__all__ = ["LightTrack", "Span", "guard", "GuardResult"]
 __version__ = "0.1.0"
