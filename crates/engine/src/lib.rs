@@ -521,16 +521,126 @@ pub fn generate(
                 output_tokens,
             })
         }
-        "openai" => Err(EngineError::Other(
-            "provider 'openai' generation needs an HTTPS adapter + OPENAI_API_KEY (not yet enabled)"
-                .into(),
-        )),
-        "google" => Err(EngineError::Other(
-            "provider 'google' generation needs an HTTPS adapter + GEMINI_API_KEY (not yet enabled)"
-                .into(),
-        )),
+        "google" => generate_gemini(model, system_prompt, input),
+        "openai" => generate_openai(model, system_prompt, input),
         other => Err(EngineError::Other(format!("unknown provider '{other}'"))),
     }
+}
+
+/// Call the OpenAI Chat Completions API. Cost is left to the caller (price by tokens). Key from
+/// OPENAI_API_KEY.
+fn generate_openai(model: &str, system_prompt: Option<&str>, input: &str) -> Result<GenOutcome> {
+    let key = std::env::var("OPENAI_API_KEY")
+        .map_err(|_| EngineError::Other("no OpenAI API key (set OPENAI_API_KEY)".into()))?;
+    let mut messages = Vec::new();
+    if let Some(sys) = system_prompt {
+        messages.push(serde_json::json!({ "role": "system", "content": sys }));
+    }
+    messages.push(serde_json::json!({ "role": "user", "content": input }));
+    let body = serde_json::json!({ "model": model, "messages": messages });
+
+    let client = reqwest::blocking::Client::new();
+    let started = Instant::now();
+    let resp = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .bearer_auth(&key)
+        .json(&body)
+        .send()
+        .map_err(|e| EngineError::Other(format!("openai request failed: {e}")))?;
+    let latency_ms = Some(started.elapsed().as_millis() as u64);
+    let status = resp.status();
+    let text = resp
+        .text()
+        .map_err(|e| EngineError::Other(format!("openai read failed: {e}")))?;
+    if !status.is_success() {
+        return Err(EngineError::Other(format!(
+            "openai HTTP {}: {text}",
+            status.as_u16()
+        )));
+    }
+    let v: Value = serde_json::from_str(&text)?;
+    let output = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let usage = v.get("usage");
+    Ok(GenOutcome {
+        output,
+        cost_usd: None, // priced by the caller from the price book
+        model: v
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| model.to_string()),
+        latency_ms,
+        input_tokens: usage.and_then(|u| u.get("prompt_tokens")).and_then(Value::as_u64),
+        output_tokens: usage
+            .and_then(|u| u.get("completion_tokens"))
+            .and_then(Value::as_u64),
+    })
+}
+
+/// Call the Google Gemini REST API (`generateContent`). Cost is left to the caller (compute from the
+/// price book by tokens); the API doesn't return a dollar cost. Key from GEMINI_API_KEY (or GOOGLE_*).
+fn generate_gemini(model: &str, system_prompt: Option<&str>, input: &str) -> Result<GenOutcome> {
+    let key = std::env::var("GEMINI_API_KEY")
+        .or_else(|_| std::env::var("GOOGLE_API_KEY"))
+        .or_else(|_| std::env::var("GOOGLE_GENERATIVE_AI_API_KEY"))
+        .map_err(|_| EngineError::Other("no Gemini API key (set GEMINI_API_KEY)".into()))?;
+    let url =
+        format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent");
+    let mut body = serde_json::json!({
+        "contents": [{ "role": "user", "parts": [{ "text": input }] }]
+    });
+    if let Some(sys) = system_prompt {
+        body["system_instruction"] = serde_json::json!({ "parts": [{ "text": sys }] });
+    }
+
+    let client = reqwest::blocking::Client::new();
+    let started = Instant::now();
+    let resp = client
+        .post(&url)
+        .header("x-goog-api-key", &key)
+        .json(&body)
+        .send()
+        .map_err(|e| EngineError::Other(format!("gemini request failed: {e}")))?;
+    let latency_ms = Some(started.elapsed().as_millis() as u64);
+    let status = resp.status();
+    let text = resp
+        .text()
+        .map_err(|e| EngineError::Other(format!("gemini read failed: {e}")))?;
+    if !status.is_success() {
+        return Err(EngineError::Other(format!(
+            "gemini HTTP {}: {text}",
+            status.as_u16()
+        )));
+    }
+    let v: Value = serde_json::from_str(&text)?;
+    let output = v
+        .get("candidates")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.get(0))
+        .and_then(|p| p.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let usage = v.get("usageMetadata");
+    Ok(GenOutcome {
+        output,
+        cost_usd: None, // computed by the caller from the price book (Gemini API returns no $)
+        model: model.to_string(),
+        latency_ms,
+        input_tokens: usage.and_then(|u| u.get("promptTokenCount")).and_then(Value::as_u64),
+        output_tokens: usage
+            .and_then(|u| u.get("candidatesTokenCount"))
+            .and_then(Value::as_u64),
+    })
 }
 
 #[cfg(test)]

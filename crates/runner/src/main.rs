@@ -19,7 +19,9 @@ use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 
 use lighttrack_anon::scrub;
-use lighttrack_core::{BenchTarget, Benchmark, BenchmarkCase, DatasetItem, Job, LlmEvent, Rubric};
+use lighttrack_core::{
+    BenchTarget, Benchmark, BenchmarkCase, DatasetItem, Job, LlmEvent, ModelPriceRow, Rubric,
+};
 use lighttrack_engine::{
     build_eval_prompt, build_judge_prompt, generate, run_judge, run_rubric_judge, run_text,
     EngineConfig,
@@ -114,6 +116,7 @@ enum DatasetCmd {
 }
 
 fn main() -> Result<()> {
+    let _ = dotenvy::dotenv(); // load .env (GEMINI_API_KEY, LIGHTTRACK_*) if present
     let cli = Cli::parse();
     let engine = EngineConfig {
         claude_bin: resolve_claude_bin(&cli.claude_bin),
@@ -286,6 +289,8 @@ fn run_compare(
         Some(rid) => Some(get(cli, http, &format!("/v1/rubrics/{rid}"))?),
         None => None,
     };
+    // For providers whose API doesn't return a $ cost (e.g. Gemini), price by tokens from the DB.
+    let prices: Vec<ModelPriceRow> = get(cli, http, "/v1/prices").unwrap_or_default();
 
     // (label, mean, pass_rate, gen_cost, judge_cost, p50_ms, errored)
     let mut rows: Vec<(String, f64, f64, f64, f64, u64, u32)> = Vec::new();
@@ -314,7 +319,9 @@ fn run_compare(
                     continue;
                 }
             };
-            gen_cost += gen.cost_usd.unwrap_or(0.0);
+            gen_cost += gen.cost_usd.unwrap_or_else(|| {
+                price_gen_cost(&prices, &t.provider, &t.model, gen.input_tokens, gen.output_tokens)
+            });
             if let Some(l) = gen.latency_ms {
                 latencies.push(l);
             }
@@ -617,6 +624,24 @@ clarifications) targeting the weakest dimensions. Return only the bullets.",
 
 fn dim_mean(sums: &HashMap<String, f64>, key: &str, n: u32) -> f64 {
     sums.get(key).copied().unwrap_or(0.0) / n.max(1) as f64
+}
+
+/// Cost of a generation from the DB price book (used when the provider API returns no $ cost).
+fn price_gen_cost(
+    prices: &[ModelPriceRow],
+    provider: &str,
+    model: &str,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+) -> f64 {
+    prices
+        .iter()
+        .find(|p| p.provider == provider && p.model == model)
+        .map(|p| {
+            (input_tokens.unwrap_or(0) as f64) * p.input_per_mtok / 1_000_000.0
+                + (output_tokens.unwrap_or(0) as f64) * p.output_per_mtok / 1_000_000.0
+        })
+        .unwrap_or(0.0)
 }
 
 /// Sample events, scrub PII (regex always; optional LLM pass), and freeze a dataset.

@@ -123,10 +123,11 @@ jobs(id, type, payload_json, status, attempts, progress, error, claimed_at, crea
    when keyed (return a clear error until then). ✅ shipped in 3.6e.
 2. **Anonymization** = hybrid: regex always + optional `--llm-scrub` pass. ✅ shipped in 3.6b.
 
-**All sub-phases 3.6a–3.6e are implemented, tested, and verified live** (see ROADMAP). Remaining future
-work noted inline above: BigQuery/Firestore Store backends + Pub/Sub queue (Phase 5/packaging), the
-OpenAI/Gemini HTTPS generation adapters, prompt-length-tiered & batch pricing, and a human-labeled
-calibration set for judge↔human agreement.
+**All sub-phases 3.6a–3.6e are implemented, tested, and verified live** (see ROADMAP). The **Gemini and
+OpenAI generation adapters are now live too** (reqwest/native-tls, keys from `.env`, gen cost priced from
+the DB book) — verified in a 3-way Claude/Gemini/OpenAI comparison. Remaining future work: BigQuery/
+Firestore Store backends + Pub/Sub queue (Phase 5/packaging), prompt-length-tiered & batch pricing, and a
+human-labeled calibration set for judge↔human agreement.
 
 ## Sources (researched 2026-05-31)
 - Anthropic API pricing — https://platform.claude.com/docs/en/about-claude/pricing
