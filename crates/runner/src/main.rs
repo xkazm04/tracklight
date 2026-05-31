@@ -50,8 +50,9 @@ fn main() -> Result<()> {
         Cmd::Bench {
             benchmark,
             samples,
+            gen_samples,
             heal,
-        } => bench::run_benchmark(&cli, &http, &engine, benchmark, *samples, *heal),
+        } => bench::run_benchmark(&cli, &http, &engine, benchmark, *samples, *gen_samples, *heal),
         Cmd::Dataset { action } => match action {
             DatasetCmd::Build {
                 project,

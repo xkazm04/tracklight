@@ -17,12 +17,14 @@ use crate::util::{percentiles, price_gen_cost};
 
 /// Resolve a benchmark's cases (inline dataset, or a referenced stored dataset) and dispatch to the
 /// right mode: comparison (target matrix), rubric (per-dimension), or simple (freeform single score).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_benchmark(
     cli: &Cli,
     http: &reqwest::blocking::Client,
     engine: &EngineConfig,
     benchmark_id: &str,
     samples: u32,
+    gen_samples: u32,
     heal: bool,
 ) -> Result<()> {
     let bench: Benchmark = get(cli, http, &format!("/v1/benchmarks/{benchmark_id}"))?;
@@ -45,7 +47,7 @@ pub(crate) fn run_benchmark(
 
     let targets: Vec<BenchTarget> = serde_json::from_value(bench.target.clone()).unwrap_or_default();
     if !targets.is_empty() {
-        return run_compare(cli, http, engine, &bench, &cases, &targets, samples);
+        return run_compare(cli, http, engine, &bench, &cases, &targets, samples, gen_samples);
     }
     if let Some(rid) = bench.rubric_id.clone() {
         return run_rubric_benchmark(cli, http, engine, &bench, &cases, &rid, samples, heal);

@@ -49,9 +49,13 @@ pub(crate) enum Cmd {
     Bench {
         #[arg(long)]
         benchmark: String,
-        /// Self-consistency: judge each case this many times and average (rubric mode).
+        /// Judge self-consistency: judge each candidate this many times and average (rubric mode).
         #[arg(long, default_value_t = 1)]
         samples: u32,
+        /// Generation self-consistency (compare mode): generate this many candidates per case and
+        /// average their scores, to average out generation variance.
+        #[arg(long, default_value_t = 1)]
+        gen_samples: u32,
         /// Add an LLM-generated recommendations/"healing" paragraph to the report (rubric mode).
         #[arg(long)]
         heal: bool,

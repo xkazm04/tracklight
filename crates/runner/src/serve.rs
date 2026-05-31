@@ -101,6 +101,8 @@ fn process_job(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("bench_run payload missing benchmark_id"))?;
             let samples = job.payload.get("samples").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+            let gen_samples =
+                job.payload.get("gen_samples").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
             let heal = job.payload.get("heal").and_then(|v| v.as_bool()).unwrap_or(false);
             let _ = post(
                 cli,
@@ -108,7 +110,7 @@ fn process_job(
                 &format!("/v1/jobs/{}/progress", job.id),
                 &json!({ "progress": format!("running benchmark {bid}") }),
             );
-            run_benchmark(cli, http, engine, bid, samples, heal)?;
+            run_benchmark(cli, http, engine, bid, samples, gen_samples, heal)?;
             Ok(json!({ "benchmark_id": bid, "status": "completed" }))
         }
         other => Err(anyhow::anyhow!("unknown job type: {other}")),

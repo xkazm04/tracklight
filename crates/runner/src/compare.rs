@@ -1,5 +1,7 @@
 //! Comparison mode: generate outputs from each target, judge them, compare quality × cost × latency.
-//! In rubric mode it also records the per-dimension breakdown + self-consistency agreement per run.
+//! Records per-dimension breakdown + agreement. With `gen_samples > 1` it generates several
+//! candidates per case and averages their scores (generation self-consistency), so a single
+//! lucky/unlucky output doesn't dominate — the judge is sampled separately via `samples`.
 
 use std::collections::HashMap;
 
@@ -19,6 +21,17 @@ fn r3(x: f64) -> f64 {
     (x * 1000.0).round() / 1000.0
 }
 
+/// Stability of a set of scores: `1 - (max - min)`, clamped to [0,1]. 1.0 = identical.
+fn stability(xs: &[f64]) -> f64 {
+    if xs.len() < 2 {
+        return 1.0;
+    }
+    let mx = xs.iter().cloned().fold(f64::MIN, f64::max);
+    let mn = xs.iter().cloned().fold(f64::MAX, f64::min);
+    (1.0 - (mx - mn)).clamp(0.0, 1.0)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_compare(
     cli: &Cli,
     http: &reqwest::blocking::Client,
@@ -27,10 +40,12 @@ pub(crate) fn run_compare(
     cases: &[BenchmarkCase],
     targets: &[BenchTarget],
     samples: u32,
+    gen_samples: u32,
 ) -> Result<()> {
     let (jp, jm) = parse_judge_spec(&bench.judge_model);
+    let ng = gen_samples.max(1);
     println!(
-        "benchmark '{}' COMPARE: {} target(s) × {} case(s), judge={jp}/{jm}, samples={samples}",
+        "benchmark '{}' COMPARE: {} target(s) × {} case(s), judge={jp}/{jm}, gen_samples={ng}, judge_samples={samples}",
         bench.name,
         targets.len(),
         cases.len(),
@@ -58,57 +73,88 @@ pub(crate) fn run_compare(
         let mut case_reports: Vec<Value> = Vec::new();
 
         for (i, case) in cases.iter().enumerate() {
-            let gen = match generate(
-                engine,
-                &t.provider,
-                &t.model,
-                t.system_prompt.as_deref(),
-                &case.input,
-            ) {
-                Ok(g) => g,
-                Err(e) => {
-                    println!("  case {}: generation skipped — {e}", i + 1);
-                    errored += 1;
-                    continue;
+            // Generate `ng` candidates for this case and judge each; the case score is their mean.
+            let mut cand_scores: Vec<f64> = Vec::new();
+            let mut judge_agrees: Vec<f64> = Vec::new();
+            let mut cand_passes = 0u32;
+            let mut case_dim_sums: HashMap<String, f64> = HashMap::new();
+            for _ in 0..ng {
+                let gen = match generate(
+                    engine,
+                    &t.provider,
+                    &t.model,
+                    t.system_prompt.as_deref(),
+                    &case.input,
+                ) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        println!("  case {}: generation error — {e}", i + 1);
+                        break;
+                    }
+                };
+                gen_cost += gen.cost_usd.unwrap_or_else(|| {
+                    price_gen_cost(&prices, &t.provider, &t.model, gen.input_tokens, gen.output_tokens)
+                });
+                if let Some(l) = gen.latency_ms {
+                    latencies.push(l);
                 }
-            };
-            gen_cost += gen.cost_usd.unwrap_or_else(|| {
-                price_gen_cost(&prices, &t.provider, &t.model, gen.input_tokens, gen.output_tokens)
-            });
-            if let Some(l) = gen.latency_ms {
-                latencies.push(l);
+                let jr = judge_output(
+                    engine, &jp, &jm, &rubric, bench, case, &gen.output, samples, &prices,
+                )?;
+                judge_cost += jr.cost;
+                cand_scores.push(jr.overall);
+                judge_agrees.push(jr.agreement);
+                if jr.pass {
+                    cand_passes += 1;
+                }
+                for (k, v) in &jr.dimensions {
+                    *case_dim_sums.entry(k.clone()).or_insert(0.0) += v;
+                }
             }
-            let jr =
-                judge_output(engine, &jp, &jm, &rubric, bench, case, &gen.output, samples, &prices)?;
-            judge_cost += jr.cost;
-            overall_sum += jr.overall;
-            agree_sum += jr.agreement;
-            if jr.pass {
+            if cand_scores.is_empty() {
+                errored += 1;
+                continue;
+            }
+
+            let n = cand_scores.len() as f64;
+            let case_score = cand_scores.iter().sum::<f64>() / n;
+            let case_pass = (cand_passes as f64 / n) >= 0.5; // majority of candidates pass
+            let gen_agree = stability(&cand_scores);
+            let judge_agree = judge_agrees.iter().sum::<f64>() / n;
+            // Headline agreement: generation stability when sampling, else the judge's own agreement.
+            let case_agree = if ng > 1 { gen_agree } else { judge_agree };
+
+            overall_sum += case_score;
+            agree_sum += case_agree;
+            if case_pass {
                 passes += 1;
             }
             judged += 1;
 
             let mut dims_obj = Map::new();
-            for (k, v) in &jr.dimensions {
-                *dim_sums.entry(k.clone()).or_insert(0.0) += v;
-                dims_obj.insert(k.clone(), json!(r3(*v)));
+            for (k, s) in &case_dim_sums {
+                let dm = s / n;
+                *dim_sums.entry(k.clone()).or_insert(0.0) += dm;
+                dims_obj.insert(k.clone(), json!(r3(dm)));
             }
-            case_reports.push(json!({
-                "case": i + 1, "score": r3(jr.overall), "pass": jr.pass,
-                "agreement": r3(jr.agreement), "dimensions": Value::Object(dims_obj),
-            }));
-            let dim_str: String = jr
-                .dimensions
+            let dim_str: String = dims_obj
                 .iter()
-                .map(|(k, v)| format!("{k}={v:.2}"))
+                .map(|(k, v)| format!("{k}={}", v.as_f64().map(|x| format!("{x:.2}")).unwrap_or_default()))
                 .collect::<Vec<_>>()
                 .join(" ");
+            case_reports.push(json!({
+                "case": i + 1, "score": r3(case_score), "pass": case_pass,
+                "gen_agreement": r3(gen_agree), "judge_agreement": r3(judge_agree),
+                "n_candidates": cand_scores.len(), "dimensions": Value::Object(dims_obj),
+            }));
             println!(
-                "  case {}: score={:.2} pass={} agree={:.2}  {dim_str}",
+                "  case {}: score={:.2} pass={} gen_agree={:.2} judge_agree={:.2} (n_gen={})  {dim_str}",
                 i + 1,
-                jr.overall,
-                jr.pass,
-                jr.agreement
+                case_score,
+                case_pass,
+                gen_agree,
+                judge_agree,
+                cand_scores.len(),
             );
         }
 
@@ -118,7 +164,6 @@ pub(crate) fn run_compare(
         let (p50, p95) = percentiles(&mut latencies);
         rows.push((label.clone(), mean, pass_rate, gen_cost, judge_cost, p50.unwrap_or(0), errored, mean_agree));
 
-        // Per-dimension means across the judged cases (empty in freeform mode).
         let dim_means: Map<String, Value> = dim_sums
             .iter()
             .map(|(k, s)| (k.clone(), json!(r3(s / judged.max(1) as f64))))
@@ -126,8 +171,8 @@ pub(crate) fn run_compare(
         let report = json!({
             "mode": "compare", "target": label, "provider": t.provider, "model": t.model,
             "prompt_label": t.label, "gen_cost_usd": gen_cost, "judge_cost_usd": judge_cost,
-            "errored_cases": errored, "samples": samples, "agreement": r3(mean_agree),
-            "dimensions": Value::Object(dim_means), "cases": case_reports,
+            "errored_cases": errored, "gen_samples": ng, "judge_samples": samples,
+            "agreement": r3(mean_agree), "dimensions": Value::Object(dim_means), "cases": case_reports,
         });
         let run = json!({
             "benchmark_id": bench.id, "n_cases": judged, "mean_score": mean, "pass_rate": pass_rate,
