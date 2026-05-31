@@ -31,15 +31,25 @@ Evolved daily. Checked items are done; the rest is the plan we agreed on.
 - [x] `api`: `POST/GET /v1/scores`, `GET /v1/events/:id`
 - [x] Verified live: Haiku judge scored a correct answer 1.0/pass and a wrong answer 0.0/fail,
       scores persisted with judge cost
-- [ ] `BenchmarkDefinition` + run + scorecard + regression baseline  → Phase 3.5
-- [ ] Scheduled online sampling + MCP trigger  → Phase 3.5 / Phase 4
+- [x] `BenchmarkDefinition` + run + scorecard + regression baseline  → see Phase 3.5
+- [ ] Scheduled online sampling of live events (cron)  → Phase 5 / cron
+
+## Phase 3.5 — Benchmarks ✅
+- [x] `core`: `BenchmarkCase` + inline `dataset` on `Benchmark`; serde defaults on `Benchmark`/`BenchmarkRun`
+- [x] `store`: create/get/list benchmarks + create/list runs (dataset stored inline as JSON)
+- [x] `api`: `POST/GET /v1/projects/:id/benchmarks`, `GET /v1/benchmarks/:id`, `GET /v1/benchmarks/:id/runs`, `POST /v1/benchmark-runs`
+- [x] `engine`: `build_eval_prompt` (rubric + optional reference answer)
+- [x] `runner`: `lt-runner bench --benchmark <id>` — judge each case, aggregate mean/pass-rate/cost, compare to baseline, record a run + per-case scores
+- [x] `mcp`: `list_benchmarks`, `get_benchmark_runs` tools
+- [x] Verified live: 3-case `capitals-qa` (2 correct, 1 wrong) → mean 0.667, `regressed` vs 0.9 baseline; run + 3 scores stored; surfaced via MCP
 
 ## Phase 4 — MCP ✅
 - [x] `mcp` (`lt-mcp`): hand-rolled JSON-RPC 2.0 stdio server (no SDK); thin HTTP client of the API
 - [x] Tools: `list_projects`, `get_cost_summary`, `query_events`, `get_limit_status`, `list_scores`
 - [x] Verified via a real JSON-RPC session (initialize → tools/list → tools/call returning live data)
 - [x] `.mcp.json` committed for project-scoped registration in Claude Code
-- [ ] `run_benchmark` tool  → after Phase 3.5 (benchmarks)
+- [x] Benchmark read tools (`list_benchmarks`, `get_benchmark_runs`) added in Phase 3.5
+      (triggering a run stays in `lt-runner`, which has the `claude -p` engine; MCP is read-only)
 
 ## Phase 5 — Cloud move
 - [ ] BigQuery `Store` backend + Firestore config backend

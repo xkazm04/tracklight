@@ -74,6 +74,27 @@ Respond with ONLY a JSON object (no prose, no code fences) of the form:\n\
     )
 }
 
+/// Build a benchmark eval prompt for an input/output pair, with an optional reference answer.
+pub fn build_eval_prompt(rubric: &str, input: &str, expected: Option<&str>, output: &str) -> String {
+    let reference = match expected {
+        Some(e) => format!("\n=== REFERENCE / EXPECTED ANSWER ===\n{e}\n"),
+        None => String::new(),
+    };
+    format!(
+        "You are a strict evaluation judge. Evaluate the ASSISTANT OUTPUT for the given USER INPUT \
+against the rubric{ref_note}.\n\
+Rubric: {rubric}\n\n\
+Respond with ONLY a JSON object (no prose, no code fences):\n\
+{{\"score\": <number 0.0-1.0>, \"max\": 1.0, \"pass\": <true|false>, \"reasoning\": \"<one sentence>\"}}\n\n\
+=== USER INPUT ===\n{input}\n{reference}\n=== ASSISTANT OUTPUT ===\n{output}\n",
+        ref_note = if expected.is_some() {
+            " and the reference answer"
+        } else {
+            ""
+        }
+    )
+}
+
 /// Run the judge with a fully-formed prompt.
 pub fn run_judge(cfg: &EngineConfig, prompt: &str) -> Result<JudgeOutcome> {
     let schema = judge_verdict_schema().to_string();

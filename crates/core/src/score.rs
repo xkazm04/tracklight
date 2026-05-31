@@ -61,31 +61,55 @@ pub struct Score {
     pub created_at: DateTime<Utc>,
 }
 
+/// One case in a benchmark dataset. `output` is the candidate to judge; `expected` is an optional
+/// reference answer the judge can compare against.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkCase {
+    pub input: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+}
+
 /// A benchmark definition: a dataset + rubric + judge run repeatedly to track quality over time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Benchmark {
+    #[serde(default = "crate::new_id")]
     pub id: String,
+    #[serde(default)]
     pub project_id: String,
     pub name: String,
     pub rubric: String,
+    #[serde(default = "default_judge_model")]
     pub judge_model: String,
     /// How to produce outputs to judge (e.g. an endpoint, a model+prompt). Free-form for now.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub target: Value,
-    /// Reference to the case dataset (path/URI/table). Resolved by the runner.
+    /// Reference to an external case dataset (path/URI/table), if not inlined in `dataset`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset_ref: Option<String>,
+    /// Inline dataset of cases.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dataset: Vec<BenchmarkCase>,
     /// Baseline mean score to detect regressions against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_score: Option<f64>,
+    #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
+}
+
+fn default_judge_model() -> String {
+    "haiku".to_string()
 }
 
 /// One execution of a [`Benchmark`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkRun {
+    #[serde(default = "crate::new_id")]
     pub id: String,
     pub benchmark_id: String,
+    #[serde(default = "Utc::now")]
     pub started_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
@@ -98,5 +122,10 @@ pub struct BenchmarkRun {
     #[serde(default)]
     pub cost_usd: f64,
     /// `running` | `passed` | `regressed` | `failed`.
+    #[serde(default = "default_run_status")]
     pub status: String,
+}
+
+fn default_run_status() -> String {
+    "completed".to_string()
 }

@@ -32,8 +32,8 @@ use serde::{Deserialize, Serialize};
 
 use auth::{AuthMode, Principal};
 use lighttrack_core::{
-    new_id, ApiKey, LimitAction, LimitMetric, LimitRule, LimitStatus, LimitWindow, LlmEvent,
-    PriceBook, Project, Redaction, Score,
+    new_id, ApiKey, Benchmark, BenchmarkCase, BenchmarkRun, LimitAction, LimitMetric, LimitRule,
+    LimitStatus, LimitWindow, LlmEvent, PriceBook, Project, Redaction, Score,
 };
 use lighttrack_store::{CostRow, SqliteStore, Store, StoreError, Usage};
 
@@ -87,6 +87,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/events/:id", get(get_event_by_id))
         .route("/v1/costs", get(get_costs))
         .route("/v1/scores", post(post_score).get(get_scores))
+        .route(
+            "/v1/projects/:id/benchmarks",
+            post(create_benchmark).get(list_benchmarks),
+        )
+        .route("/v1/benchmarks/:id", get(get_benchmark))
+        .route("/v1/benchmarks/:id/runs", get(list_benchmark_runs))
+        .route("/v1/benchmark-runs", post(post_benchmark_run))
         .route("/v1/projects", post(create_project).get(list_projects))
         .route("/v1/projects/:id/keys", post(create_key))
         .route("/v1/projects/:id/limits", post(create_limit).get(list_limits))
@@ -381,6 +388,118 @@ async fn get_scores(
     let limit = q.limit.unwrap_or(50).min(1000);
     let scores = spawn_db(move || store.list_scores(project.as_deref(), limit)).await?;
     Ok(Json(scores))
+}
+
+// ----------------------------------------------------------------------------
+// Benchmarks (Phase 3.5)
+// ----------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct CreateBenchmarkReq {
+    name: String,
+    rubric: String,
+    #[serde(default = "default_judge_model")]
+    judge_model: String,
+    #[serde(default)]
+    target: serde_json::Value,
+    #[serde(default)]
+    dataset: Vec<BenchmarkCase>,
+    #[serde(default)]
+    baseline_score: Option<f64>,
+}
+
+fn default_judge_model() -> String {
+    "haiku".to_string()
+}
+
+async fn create_benchmark(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(pid): Path<String>,
+    Json(req): Json<CreateBenchmarkReq>,
+) -> Result<Json<Benchmark>, ApiError> {
+    ensure_can_admin(&authenticate(&st, &headers).await?)?;
+    let b = Benchmark {
+        id: new_id(),
+        project_id: pid,
+        name: req.name,
+        rubric: req.rubric,
+        judge_model: req.judge_model,
+        target: req.target,
+        dataset_ref: None,
+        dataset: req.dataset,
+        baseline_score: req.baseline_score,
+        created_at: Utc::now(),
+    };
+    let store = st.store.clone();
+    let b2 = b.clone();
+    spawn_db(move || store.create_benchmark(&b2)).await?;
+    Ok(Json(b))
+}
+
+async fn list_benchmarks(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(pid): Path<String>,
+) -> Result<Json<Vec<Benchmark>>, ApiError> {
+    let p = authenticate(&st, &headers).await?;
+    resolve_read_project(&p, Some(&pid))?;
+    let store = st.store.clone();
+    let v = spawn_db(move || store.list_benchmarks(&pid)).await?;
+    Ok(Json(v))
+}
+
+/// Fetch a benchmark and authorize project-key access to it.
+async fn load_benchmark_authorized(
+    st: &AppState,
+    p: &Principal,
+    id: &str,
+) -> Result<Benchmark, ApiError> {
+    let store = st.store.clone();
+    let id2 = id.to_string();
+    let bench = spawn_db(move || store.get_benchmark(&id2))
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("benchmark '{id}' not found")))?;
+    if let Principal::Project(pid) = p {
+        if &bench.project_id != pid {
+            return Err(ApiError::forbidden("key not authorized for that benchmark"));
+        }
+    }
+    Ok(bench)
+}
+
+async fn get_benchmark(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Benchmark>, ApiError> {
+    let p = authenticate(&st, &headers).await?;
+    Ok(Json(load_benchmark_authorized(&st, &p, &id).await?))
+}
+
+async fn list_benchmark_runs(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<BenchmarkRun>>, ApiError> {
+    let p = authenticate(&st, &headers).await?;
+    load_benchmark_authorized(&st, &p, &id).await?; // authorize
+    let store = st.store.clone();
+    let runs = spawn_db(move || store.list_benchmark_runs(&id)).await?;
+    Ok(Json(runs))
+}
+
+async fn post_benchmark_run(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(run): Json<BenchmarkRun>,
+) -> Result<Json<BenchmarkRun>, ApiError> {
+    let p = authenticate(&st, &headers).await?;
+    load_benchmark_authorized(&st, &p, &run.benchmark_id).await?; // authorize via the benchmark
+    let store = st.store.clone();
+    let run2 = run.clone();
+    spawn_db(move || store.create_benchmark_run(&run2)).await?;
+    Ok(Json(run))
 }
 
 // ----------------------------------------------------------------------------

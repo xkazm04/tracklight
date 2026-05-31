@@ -15,8 +15,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 
-use lighttrack_core::LlmEvent;
-use lighttrack_engine::{build_judge_prompt, run_judge, EngineConfig};
+use lighttrack_core::{Benchmark, LlmEvent};
+use lighttrack_engine::{build_eval_prompt, build_judge_prompt, run_judge, EngineConfig};
 
 #[derive(Parser)]
 #[command(name = "lt-runner", about = "LightTrack scoring runner (claude -p judge)")]
@@ -60,6 +60,11 @@ enum Cmd {
         #[arg(long)]
         project: String,
     },
+    /// Run a stored benchmark: judge each case, aggregate a scorecard, record a run.
+    Bench {
+        #[arg(long)]
+        benchmark: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -89,7 +94,115 @@ fn main() -> Result<()> {
             println!("posted score: {}", serde_json::to_string_pretty(&stored)?);
             Ok(())
         }
+        Cmd::Bench { benchmark } => run_benchmark(&cli, &http, &engine, benchmark),
     }
+}
+
+fn run_benchmark(
+    cli: &Cli,
+    http: &reqwest::blocking::Client,
+    engine: &EngineConfig,
+    benchmark_id: &str,
+) -> Result<()> {
+    let bench: Benchmark = get(cli, http, &format!("/v1/benchmarks/{benchmark_id}"))?;
+    println!(
+        "benchmark '{}' — {} case(s), judge={}, baseline={}",
+        bench.name,
+        bench.dataset.len(),
+        bench.judge_model,
+        bench
+            .baseline_score
+            .map(|b| format!("{b:.3}"))
+            .unwrap_or_else(|| "none".into())
+    );
+
+    // Judge with the benchmark's own model.
+    let bench_engine = EngineConfig {
+        claude_bin: engine.claude_bin.clone(),
+        model: bench.judge_model.clone(),
+        bare: engine.bare,
+    };
+
+    let (mut sum, mut n, mut passes, mut cost) = (0.0_f64, 0u32, 0u32, 0.0_f64);
+    for (i, case) in bench.dataset.iter().enumerate() {
+        let output = match &case.output {
+            Some(o) => o,
+            None => {
+                println!("  case {}: skipped (no output)", i + 1);
+                continue;
+            }
+        };
+        let prompt = build_eval_prompt(&bench.rubric, &case.input, case.expected.as_deref(), output);
+        let outcome = run_judge(&bench_engine, &prompt).context("judge (claude -p) failed")?;
+        let norm = if outcome.verdict.max > 0.0 {
+            outcome.verdict.score / outcome.verdict.max
+        } else {
+            outcome.verdict.score
+        };
+        sum += norm;
+        n += 1;
+        if outcome.verdict.pass {
+            passes += 1;
+        }
+        cost += outcome.cost_usd.unwrap_or(0.0);
+        println!(
+            "  case {}: score={:.2} pass={} :: {}",
+            i + 1,
+            norm,
+            outcome.verdict.pass,
+            outcome.verdict.reasoning
+        );
+        // Persist each case score under a bench-scoped rubric.
+        let score = json!({
+            "project_id": bench.project_id,
+            "rubric": format!("bench:{}", bench.name),
+            "value": outcome.verdict.score,
+            "max": outcome.verdict.max,
+            "pass": outcome.verdict.pass,
+            "reasoning": outcome.verdict.reasoning,
+            "scored_by": outcome.model,
+            "cost_usd": outcome.cost_usd,
+        });
+        post(cli, http, "/v1/scores", &score)?;
+    }
+
+    let mean = if n > 0 { sum / n as f64 } else { 0.0 };
+    let pass_rate = if n > 0 { passes as f64 / n as f64 } else { 0.0 };
+    let status = match bench.baseline_score {
+        Some(b) if mean + 1e-9 < b => "regressed",
+        Some(_) => "passed",
+        None => "no_baseline",
+    };
+
+    println!(
+        "\nscorecard: mean={mean:.3}  pass_rate={:.0}%  cost=${cost:.5}  status={status}",
+        pass_rate * 100.0
+    );
+    if let Some(b) = bench.baseline_score {
+        println!(
+            "baseline={b:.3} -> {}",
+            if status == "regressed" {
+                "REGRESSION"
+            } else {
+                "ok"
+            }
+        );
+    }
+
+    let run = json!({
+        "benchmark_id": bench.id,
+        "n_cases": n,
+        "mean_score": mean,
+        "pass_rate": pass_rate,
+        "cost_usd": cost,
+        "status": status,
+    });
+    let stored = post(cli, http, "/v1/benchmark-runs", &run)?;
+    println!(
+        "recorded run {}",
+        stored.get("id").and_then(|v| v.as_str()).unwrap_or("?")
+    );
+    Ok(())
 }
 
 fn score_recent(

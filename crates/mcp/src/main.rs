@@ -130,6 +130,24 @@ fn tools_list() -> Value {
                         "limit": { "type": "integer", "description": "max scores (default 20)" }
                     }
                 }
+            },
+            {
+                "name": "list_benchmarks",
+                "description": "List a project's benchmark definitions (with their inline datasets).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "project": { "type": "string" } },
+                    "required": ["project"]
+                }
+            },
+            {
+                "name": "get_benchmark_runs",
+                "description": "Run history (scorecards: mean score, pass rate, cost, status) for a benchmark.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "benchmark": { "type": "string", "description": "benchmark id" } },
+                    "required": ["benchmark"]
+                }
             }
         ]
     })
@@ -147,6 +165,14 @@ fn handle_tool_call(cfg: &Config, params: &Value) -> Value {
         "get_limit_status" => match args.get("project").and_then(Value::as_str) {
             Some(p) => api_get(cfg, &format!("/v1/limits/status?project={p}")),
             None => Err("missing required argument: project".into()),
+        },
+        "list_benchmarks" => match args.get("project").and_then(Value::as_str) {
+            Some(p) => api_get(cfg, &format!("/v1/projects/{p}/benchmarks")),
+            None => Err("missing required argument: project".into()),
+        },
+        "get_benchmark_runs" => match args.get("benchmark").and_then(Value::as_str) {
+            Some(b) => api_get(cfg, &format!("/v1/benchmarks/{b}/runs")),
+            None => Err("missing required argument: benchmark".into()),
         },
         other => Err(format!("unknown tool: {other}")),
     };

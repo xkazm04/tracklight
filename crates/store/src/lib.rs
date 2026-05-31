@@ -12,7 +12,9 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use thiserror::Error;
 
-use lighttrack_core::{ApiKey, LimitRule, LlmEvent, Project, Score};
+use lighttrack_core::{
+    ApiKey, Benchmark, BenchmarkRun, LimitRule, LlmEvent, Project, Score,
+};
 
 pub use sqlite::SqliteStore;
 
@@ -87,4 +89,11 @@ pub trait Store: Send + Sync {
     fn get_event(&self, id: &str) -> Result<Option<LlmEvent>>;
     fn insert_score(&self, s: &Score) -> Result<()>;
     fn list_scores(&self, project: Option<&str>, limit: usize) -> Result<Vec<Score>>;
+
+    // --- benchmarks (Phase 3.5) ---
+    fn create_benchmark(&self, b: &Benchmark) -> Result<()>;
+    fn get_benchmark(&self, id: &str) -> Result<Option<Benchmark>>;
+    fn list_benchmarks(&self, project: &str) -> Result<Vec<Benchmark>>;
+    fn create_benchmark_run(&self, r: &BenchmarkRun) -> Result<()>;
+    fn list_benchmark_runs(&self, benchmark_id: &str) -> Result<Vec<BenchmarkRun>>;
 }

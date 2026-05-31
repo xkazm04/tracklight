@@ -16,7 +16,9 @@ pub use event::{LlmEvent, Operation, Provider, Status, TokenUsage};
 pub use limits::{LimitAction, LimitMetric, LimitRule, LimitStatus, LimitWindow};
 pub use pricing::{ModelPrice, PriceBook};
 pub use project::{ApiKey, Project, Redaction};
-pub use score::{judge_verdict_schema, Benchmark, BenchmarkRun, JudgeVerdict, Score};
+pub use score::{
+    judge_verdict_schema, Benchmark, BenchmarkCase, BenchmarkRun, JudgeVerdict, Score,
+};
 
 /// Convenience: a fresh UUIDv4 as a `String` (our canonical id form).
 pub fn new_id() -> String {

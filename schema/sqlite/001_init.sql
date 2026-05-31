@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS benchmarks (
   judge_model    TEXT NOT NULL,
   target         TEXT,         -- JSON
   dataset_ref    TEXT,
+  dataset        TEXT,         -- JSON array of {input, expected?, output?}
   baseline_score REAL,
   created_at     TEXT NOT NULL
 );

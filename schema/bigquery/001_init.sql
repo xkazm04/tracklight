@@ -47,6 +47,19 @@ CREATE TABLE IF NOT EXISTS `${DATASET}.scores` (
 PARTITION BY DATE(created_at)
 CLUSTER BY project_id, rubric;
 
+CREATE TABLE IF NOT EXISTS `${DATASET}.benchmarks` (
+  id             STRING NOT NULL,
+  project_id     STRING NOT NULL,
+  name           STRING NOT NULL,
+  rubric         STRING NOT NULL,
+  judge_model    STRING NOT NULL,
+  target         JSON,
+  dataset_ref    STRING,
+  dataset        JSON,         -- array of {input, expected?, output?}
+  baseline_score FLOAT64,
+  created_at     TIMESTAMP NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS `${DATASET}.benchmark_runs` (
   id           STRING NOT NULL,
   benchmark_id STRING NOT NULL,
