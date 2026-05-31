@@ -3,12 +3,15 @@ name = "lighttrack-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "LightTrack operator CLI — query, manage projects/keys/limits, define & trigger benchmarks."
+description = "LightTrack operator CLI (`lt`) — query, manage projects/keys/limits, check limit status."
 
 [[bin]]
 name = "lt"
 path = "src/main.rs"
 
 [dependencies]
-lighttrack-core.workspace = true
-# Added in Phase 2: clap (derive), reqwest, serde_json, anyhow
+serde_json.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+# http-only (no TLS) blocking client — fine for talking to the local API / Cloud Run over a proxy.
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking"] }
+anyhow = "1"

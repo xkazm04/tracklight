@@ -12,14 +12,16 @@ Evolved daily. Checked items are done; the rest is the plan we agreed on.
 - [x] `Store` trait + SQLite backend (`rusqlite`, bundled)
 - [x] `api`: `POST /v1/events` (normalize + compute cost + write), `GET /v1/events`, `GET /v1/costs`
 - [x] Verify: synthetic traffic from 3 fake "apps", cost rollups confirmed against the running server
-- [ ] Project + API-key model; `dev` mode (relaxed auth) vs enforced  → moved into Phase 2
-- [ ] Minimal client snippet (Rust + Python) to wrap OpenAI/Anthropic/Gemini calls
+- [x] Project + API-key model; `dev` (relaxed) vs `enforced` auth  → done in Phase 2
+- [ ] Minimal client snippet (Rust + Python) to wrap OpenAI/Anthropic/Gemini calls  → Phase 2.5
 
-## Phase 2 — Projects, keys, limits
-- [ ] CRUD for projects, API keys (hashed), limit rules (via `cli` + API)
-- [ ] Rolling counters + limit evaluation on ingest
-- [ ] `GET /v1/limits/status` advisory throttle flag
-- [ ] Inline breach alerts (webhook/ntfy to start)
+## Phase 2 — Projects, keys, limits ✅
+- [x] CRUD for projects, API keys (salted-hash), limit rules (via `lt` CLI + API)
+- [x] Rolling-window usage + limit evaluation on ingest (cost/calls/tokens × hour/day/month)
+- [x] `GET /v1/limits/status` advisory throttle flag; breaches surfaced in the ingest response
+- [x] `dev` vs `enforced` auth (admin key + per-project keys); verified 401/403 boundaries
+- [x] `lt` CLI (projects/keys/limits/costs/events) — verified against the enforced server
+- [~] Inline breach alerts: server-side `[ALERT]` log done; webhook/ntfy/Pub/Sub delivery deferred to Phase 5 (cloud)
 
 ## Phase 3 — Scoring & benchmarks
 - [ ] `runner`: job queue (in-proc channel locally), `claude -p --json-schema` judge, parse verdict + cost

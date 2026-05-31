@@ -115,6 +115,8 @@ impl TokenUsage {
 pub struct LlmEvent {
     #[serde(default = "crate::new_id")]
     pub id: String,
+    /// Defaulted so keyed ingest can omit it (the API derives it from the API key).
+    #[serde(default)]
     pub project_id: String,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -8,10 +8,11 @@
 
 pub mod sqlite;
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use thiserror::Error;
 
-use lighttrack_core::LlmEvent;
+use lighttrack_core::{ApiKey, LimitRule, LlmEvent, Project};
 
 pub use sqlite::SqliteStore;
 
@@ -41,6 +42,14 @@ pub struct CostRow {
     pub cost_usd: f64,
 }
 
+/// Aggregate usage for a project over a time window — used to evaluate limits.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct Usage {
+    pub cost_usd: f64,
+    pub calls: i64,
+    pub tokens: i64,
+}
+
 /// Backend-agnostic persistence interface.
 pub trait Store: Send + Sync {
     /// Create tables if they don't exist.
@@ -54,4 +63,23 @@ pub trait Store: Send + Sync {
 
     /// Cost/usage rollup grouped by project + provider + model, optionally filtered by project.
     fn cost_summary(&self, project: Option<&str>) -> Result<Vec<CostRow>>;
+
+    /// Aggregate usage for one project since `since` (inclusive). Used by limit evaluation.
+    fn usage_since(&self, project: &str, since: DateTime<Utc>) -> Result<Usage>;
+
+    // --- projects ---
+    fn create_project(&self, p: &Project) -> Result<()>;
+    fn get_project(&self, id: &str) -> Result<Option<Project>>;
+    fn list_projects(&self) -> Result<Vec<Project>>;
+
+    // --- API keys ---
+    fn create_api_key(&self, k: &ApiKey) -> Result<()>;
+    /// Look up a key by its (non-secret) prefix, for auth. Returns even revoked keys; caller checks.
+    fn find_api_key_by_prefix(&self, prefix: &str) -> Result<Option<ApiKey>>;
+    /// Best-effort update of `last_used_at`.
+    fn touch_api_key(&self, id: &str, when: DateTime<Utc>) -> Result<()>;
+
+    // --- limit rules ---
+    fn create_limit_rule(&self, r: &LimitRule) -> Result<()>;
+    fn list_limit_rules(&self, project: &str, only_enabled: bool) -> Result<Vec<LimitRule>>;
 }

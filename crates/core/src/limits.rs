@@ -1,3 +1,4 @@
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 /// What a limit measures over its window.
@@ -9,13 +10,41 @@ pub enum LimitMetric {
     Tokens,
 }
 
+impl Default for LimitMetric {
+    fn default() -> Self {
+        LimitMetric::CostUsd
+    }
+}
+
 /// Rolling window a limit is evaluated over.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LimitWindow {
     Hour,
     Day,
     Month,
+}
+
+impl Default for LimitWindow {
+    fn default() -> Self {
+        LimitWindow::Day
+    }
+}
+
+impl LimitWindow {
+    /// Rolling look-back duration for this window (Month is treated as 30 days for now).
+    pub fn lookback(&self) -> Duration {
+        match self {
+            LimitWindow::Hour => Duration::hours(1),
+            LimitWindow::Day => Duration::days(1),
+            LimitWindow::Month => Duration::days(30),
+        }
+    }
+
+    /// The start of the rolling window relative to `now`.
+    pub fn since(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        now - self.lookback()
+    }
 }
 
 /// What happens when a limit is breached. `Block` is advisory until gateway/proxy mode exists.
@@ -25,6 +54,12 @@ pub enum LimitAction {
     Alert,
     Throttle,
     Block,
+}
+
+impl Default for LimitAction {
+    fn default() -> Self {
+        LimitAction::Alert
+    }
 }
 
 /// A per-project limit. Tripped by **monitored traffic only** — the scoring engine is exempt.
