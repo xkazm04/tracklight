@@ -25,7 +25,11 @@ Evolved daily. Checked items are done; the rest is the plan we agreed on.
 - [x] `GET /v1/limits/status` advisory throttle flag; breaches surfaced in the ingest response
 - [x] `dev` vs `enforced` auth (admin key + per-project keys); verified 401/403 boundaries
 - [x] `lt` CLI (projects/keys/limits/costs/events) — verified against the enforced server
-- [~] Inline breach alerts: server-side `[ALERT]` log done; webhook/ntfy/Pub/Sub delivery deferred to Phase 5 (cloud)
+- [x] Inline breach alerts: server-side `[ALERT]` log + **delivery to webhook / ntfy** on breach
+      (`LIGHTTRACK_ALERT_WEBHOOK` / `_NTFY` / `_COOLDOWN_SECS`). Best-effort, off the request path
+      (spawned task), deduped per (project, metric, window) by a cooldown. Webhook payload carries
+      `text` (Slack) + `content` (Discord) + structured `breach`. See `docs/ALERTS.md`. *Verified live:*
+      3 breaching ingests → exactly 1 webhook + 1 ntfy delivered (dedup). Pub/Sub fan-out is Phase 5.
 
 ## Phase 3 — Scoring engine ✅ (benchmarks pending)
 - [x] `engine` crate: `claude -p --output-format json --model <m> --json-schema <JudgeVerdict>`

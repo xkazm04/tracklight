@@ -54,6 +54,8 @@ pub(crate) async fn post_event(
             b.project_id, b.metric, b.window, b.current, b.threshold, b.action
         );
     }
+    // Best-effort, off the request path: deliver breaches to webhook/ntfy (deduped per cooldown).
+    st.alerts.notify(&breached);
 
     Ok(Json(IngestResponse {
         id: ev.id,

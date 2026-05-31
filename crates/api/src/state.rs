@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock};
 use lighttrack_core::PriceBook;
 use lighttrack_store::{Store, StoreError};
 
+use crate::alerts::Alerter;
 use crate::auth::AuthMode;
 use crate::error::ApiError;
 
@@ -15,6 +16,8 @@ pub(crate) struct AppState {
     pub(crate) prices: Arc<RwLock<PriceBook>>,
     pub(crate) auth_mode: AuthMode,
     pub(crate) admin_key: Option<String>,
+    /// Best-effort breach-alert delivery (webhook / ntfy), configured from env.
+    pub(crate) alerts: Arc<Alerter>,
 }
 
 /// Run a blocking store call on the blocking pool and flatten the two error layers.

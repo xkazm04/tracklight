@@ -18,8 +18,10 @@
 //!   GET  /v1/limits/status?project=      evaluate limits -> throttle flag + per-rule status
 //!
 //! Env: LIGHTTRACK_BIND, LIGHTTRACK_DB, LIGHTTRACK_DATABASE_URL, LIGHTTRACK_PRICING,
-//!      LIGHTTRACK_AUTH_MODE (dev|enforced), LIGHTTRACK_ADMIN_KEY.
+//!      LIGHTTRACK_AUTH_MODE (dev|enforced), LIGHTTRACK_ADMIN_KEY,
+//!      LIGHTTRACK_ALERT_WEBHOOK / LIGHTTRACK_ALERT_NTFY / LIGHTTRACK_ALERT_COOLDOWN_SECS (see alerts).
 
+mod alerts;
 mod auth;
 mod benchmarks;
 mod datasets;
@@ -105,15 +107,18 @@ async fn main() -> anyhow::Result<()> {
     .await??;
     let n_prices = book.len();
 
+    let alerts = Arc::new(alerts::Alerter::from_env());
+    let alerts_desc = alerts.describe();
     let state = AppState {
         store,
         prices: Arc::new(RwLock::new(book)),
         auth_mode,
         admin_key,
+        alerts,
     };
 
     println!(
-        "lighttrack-api v{} on http://{bind}  (store={backend}, {n_prices} priced models, auth={:?}, admin_key={})",
+        "lighttrack-api v{} on http://{bind}  (store={backend}, {n_prices} priced models, auth={:?}, admin_key={}, alerts={alerts_desc})",
         env!("CARGO_PKG_VERSION"),
         state.auth_mode,
         if state.admin_key.is_some() { "set" } else { "unset" },
