@@ -14,6 +14,7 @@ mod compare;
 mod dataset;
 mod http;
 mod rubric;
+mod schedule;
 mod score;
 mod serve;
 mod util;
@@ -59,6 +60,16 @@ fn main() -> Result<()> {
                 llm_scrub,
             } => dataset::build_dataset(&cli, &http, &engine, project, name, *n, *llm_scrub),
         },
+        Cmd::Schedule {
+            project,
+            interval,
+            once,
+            n,
+            name_prefix,
+            llm_scrub,
+        } => schedule::schedule(
+            &cli, &http, &engine, project, *interval, *once, *n, name_prefix, *llm_scrub,
+        ),
         Cmd::Serve {
             once,
             interval,

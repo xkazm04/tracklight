@@ -1,4 +1,5 @@
 //! `dataset build`: sample real events, scrub PII (regex always + optional LLM pass), freeze.
+//! The core builder (`build_from_events`) is reused by the `schedule` online-sampling loop.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -11,7 +12,7 @@ use crate::cli::Cli;
 use crate::http::{get, post};
 use crate::util::{short, value_to_text};
 
-/// Sample events, scrub PII, and freeze a new dataset.
+/// Sample the most recent `n` events for `project`, scrub PII, and freeze a new dataset.
 pub(crate) fn build_dataset(
     cli: &Cli,
     http: &reqwest::blocking::Client,
@@ -22,7 +23,27 @@ pub(crate) fn build_dataset(
     llm_scrub: bool,
 ) -> Result<()> {
     let events: Vec<LlmEvent> = get(cli, http, &format!("/v1/events?project={project}&limit={n}"))?;
+    if build_from_events(cli, http, engine, project, name, &events, llm_scrub)? == 0 {
+        println!("no events with input to sample; nothing built");
+    }
+    Ok(())
+}
+
+/// Build a frozen dataset named `name` from `events` (those carrying an `input`). Returns the number
+/// of items built; returns 0 *without* creating a dataset when there is nothing to sample.
+pub(crate) fn build_from_events(
+    cli: &Cli,
+    http: &reqwest::blocking::Client,
+    engine: &EngineConfig,
+    project: &str,
+    name: &str,
+    events: &[LlmEvent],
+    llm_scrub: bool,
+) -> Result<u32> {
     let with_input: Vec<&LlmEvent> = events.iter().filter(|e| e.input.is_some()).collect();
+    if with_input.is_empty() {
+        return Ok(0);
+    }
     println!(
         "sampling {} of {} event(s) with input from '{project}' (llm_scrub={llm_scrub})",
         with_input.len(),
@@ -68,8 +89,8 @@ pub(crate) fn build_dataset(
     }
 
     post(cli, http, &format!("/v1/datasets/{dsid}/freeze"), &json!({}))?;
-    println!("\nbuilt dataset {dsid}: {built} items, {total_redactions} total redactions, frozen");
-    Ok(())
+    println!("built dataset {dsid} '{name}': {built} items, {total_redactions} total redactions, frozen");
+    Ok(built)
 }
 
 /// Regex scrub (always) + optional LLM scrub pass. Returns (clean_text, redaction_count).

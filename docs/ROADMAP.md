@@ -36,7 +36,12 @@ Evolved daily. Checked items are done; the rest is the plan we agreed on.
 - [x] Verified live: Haiku judge scored a correct answer 1.0/pass and a wrong answer 0.0/fail,
       scores persisted with judge cost
 - [x] `BenchmarkDefinition` + run + scorecard + regression baseline  → see Phase 3.5
-- [ ] Scheduled online sampling of live events (cron)  → Phase 5 / cron
+- [x] Scheduled online sampling of live events: `lt-runner schedule --project <id> [--interval s |
+      --once] [--n N --name-prefix p --llm-scrub]` periodically samples recent events → scrubs PII →
+      freezes a dataset. Idempotent (dataset named after the newest sampled event; idle cycles skip,
+      even across `--once` runs), so it works as a daemon or under OS cron / systemd / Task Scheduler /
+      Cloud Scheduler (see `docs/SCHEDULING.md`). *Verified live:* build → skip-when-idle → rebuild on
+      new traffic, 2 distinct datasets, PII redacted.
 
 ## Phase 3.5 — Benchmarks ✅
 - [x] `core`: `BenchmarkCase` + inline `dataset` on `Benchmark`; serde defaults on `Benchmark`/`BenchmarkRun`

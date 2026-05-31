@@ -85,6 +85,27 @@ pub(crate) enum Cmd {
         #[arg(long)]
         report: Option<String>,
     },
+    /// Periodically sample live events into frozen datasets (online sampling). Daemon by default;
+    /// `--once` runs a single cycle (for OS cron / Cloud Scheduler / a systemd timer).
+    Schedule {
+        #[arg(long)]
+        project: String,
+        /// Seconds between sampling cycles (daemon mode).
+        #[arg(long, default_value_t = 3600)]
+        interval: u64,
+        /// Run a single cycle and exit (for an external scheduler).
+        #[arg(long)]
+        once: bool,
+        /// Events to sample per cycle (most recent).
+        #[arg(long, default_value_t = 50)]
+        n: usize,
+        /// Dataset name prefix; each cycle creates `<prefix>-<UTC timestamp>`.
+        #[arg(long, default_value = "online")]
+        name_prefix: String,
+        /// Add an LLM (claude -p) anonymization pass for names/free-text PII the regex misses.
+        #[arg(long)]
+        llm_scrub: bool,
+    },
     /// Run as a worker: poll the job queue and execute jobs (e.g. bench_run).
     Serve {
         /// Process at most one cycle (claim+run one job, or exit if none) and stop.
