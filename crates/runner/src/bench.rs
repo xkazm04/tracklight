@@ -157,6 +157,8 @@ pub(crate) struct JudgeResult {
     pub(crate) overall: f64,
     pub(crate) pass: bool,
     pub(crate) cost: f64,
+    /// Total tokens the judge consumed scoring this output (across samples).
+    pub(crate) tokens: u64,
     /// Cross-sample agreement on the overall score (1.0 = identical across samples).
     pub(crate) agreement: f64,
     /// (dimension key, mean score) pairs; empty for freeform-rubric judging.
@@ -190,6 +192,7 @@ pub(crate) fn judge_output(
             overall: o.overall,
             pass: o.pass,
             cost: jc,
+            tokens: o.tokens.unwrap_or(0),
             agreement: o.agreement,
             dimensions: o.dimensions.iter().map(|d| (d.key.clone(), d.score)).collect(),
         })
@@ -208,6 +211,7 @@ pub(crate) fn judge_output(
             overall: norm,
             pass: v.verdict.pass,
             cost: jc,
+            tokens: v.input_tokens.unwrap_or(0) + v.output_tokens.unwrap_or(0),
             agreement: 1.0,
             dimensions: Vec::new(),
         })

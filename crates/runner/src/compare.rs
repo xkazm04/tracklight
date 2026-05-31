@@ -71,6 +71,7 @@ pub(crate) fn run_compare(
         let mut dim_sums: HashMap<String, f64> = HashMap::new();
         let mut agree_sum = 0.0_f64;
         let mut case_reports: Vec<Value> = Vec::new();
+        let (mut gen_tokens, mut judge_tokens) = (0u64, 0u64);
 
         for (i, case) in cases.iter().enumerate() {
             // Generate `ng` candidates for this case and judge each; the case score is their mean.
@@ -78,6 +79,7 @@ pub(crate) fn run_compare(
             let mut judge_agrees: Vec<f64> = Vec::new();
             let mut cand_passes = 0u32;
             let mut case_dim_sums: HashMap<String, f64> = HashMap::new();
+            let mut case_judge_cost = 0.0_f64;
             for _ in 0..ng {
                 let gen = match generate(
                     engine,
@@ -95,6 +97,7 @@ pub(crate) fn run_compare(
                 gen_cost += gen.cost_usd.unwrap_or_else(|| {
                     price_gen_cost(&prices, &t.provider, &t.model, gen.input_tokens, gen.output_tokens)
                 });
+                gen_tokens += gen.input_tokens.unwrap_or(0) + gen.output_tokens.unwrap_or(0);
                 if let Some(l) = gen.latency_ms {
                     latencies.push(l);
                 }
@@ -102,6 +105,8 @@ pub(crate) fn run_compare(
                     engine, &jp, &jm, &rubric, bench, case, &gen.output, samples, &prices,
                 )?;
                 judge_cost += jr.cost;
+                judge_tokens += jr.tokens;
+                case_judge_cost += jr.cost;
                 cand_scores.push(jr.overall);
                 judge_agrees.push(jr.agreement);
                 if jr.pass {
@@ -156,6 +161,16 @@ pub(crate) fn run_compare(
                 judge_agree,
                 cand_scores.len(),
             );
+            // Per-case judge verdict → /v1/scores (queryable per case, not just the run aggregate).
+            // Best-effort: a transient post failure must not abort a long comparison run.
+            let score = json!({
+                "project_id": bench.project_id,
+                "rubric": format!("{}:{label}#case{}", bench.name, i + 1),
+                "value": r3(case_score), "max": 1.0, "pass": case_pass,
+                "reasoning": dim_str, "scored_by": format!("{jp}/{jm}"),
+                "cost_usd": case_judge_cost,
+            });
+            let _ = post(cli, http, "/v1/scores", &score);
         }
 
         let mean = if judged > 0 { overall_sum / judged as f64 } else { 0.0 };
@@ -171,13 +186,15 @@ pub(crate) fn run_compare(
         let report = json!({
             "mode": "compare", "target": label, "provider": t.provider, "model": t.model,
             "prompt_label": t.label, "gen_cost_usd": gen_cost, "judge_cost_usd": judge_cost,
+            "gen_tokens": gen_tokens, "judge_tokens": judge_tokens,
             "errored_cases": errored, "gen_samples": ng, "judge_samples": samples,
             "agreement": r3(mean_agree), "dimensions": Value::Object(dim_means), "cases": case_reports,
         });
         let run = json!({
             "benchmark_id": bench.id, "n_cases": judged, "mean_score": mean, "pass_rate": pass_rate,
             "cost_usd": gen_cost + judge_cost, "status": "compared",
-            "p50_latency_ms": p50, "p95_latency_ms": p95, "report": report,
+            "p50_latency_ms": p50, "p95_latency_ms": p95, "total_tokens": gen_tokens + judge_tokens,
+            "report": report,
         });
         post(cli, http, "/v1/benchmark-runs", &run)?;
     }
