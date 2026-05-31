@@ -35,6 +35,16 @@ cargo build
 cargo run -p lighttrack-api      # placeholder banner for now
 ```
 
+## Use from Claude Code (MCP)
+`lt-mcp` is an MCP server exposing read tools (`list_projects`, `get_cost_summary`, `query_events`,
+`get_limit_status`, `list_scores`) over the API. A project-scoped [`.mcp.json`](.mcp.json) is committed,
+so after `cargo build` and starting the API on `:8787`, open Claude Code in this repo and approve the
+`lighttrack` server — then ask things like *"what did project qa-demo spend?"* or *"show recent scores"*.
+
+- Windows path is `target/debug/lt-mcp.exe`; on Linux/macOS change it to `target/debug/lt-mcp`.
+- In `enforced` auth mode, add `"LIGHTTRACK_KEY": "<admin-or-project-key>"` to the server's `env`.
+- Equivalent manual registration: `claude mcp add lighttrack -- <abs-path-to>/lt-mcp.exe`.
+
 ## Key facts to remember
 - **Claude Code billing changes 2026-06-15:** headless `claude -p` no longer draws on the normal
   subscription — it meters against a separate monthly **Agent SDK credit** (Max 20x = $200/mo, no rollover)

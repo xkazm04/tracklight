@@ -3,8 +3,13 @@ name = "lighttrack-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "LightTrack MCP server — query traces/costs/scores and trigger benchmarks from Claude Code."
+description = "LightTrack MCP server (`lt-mcp`) — query traces/costs/scores/limits from Claude Code."
+
+[[bin]]
+name = "lt-mcp"
+path = "src/main.rs"
 
 [dependencies]
-lighttrack-core.workspace = true
-# Added in Phase 4: an MCP SDK (or hand-rolled stdio JSON-RPC), tokio, serde_json
+serde_json.workspace = true
+# http-only blocking client (local API). Add a TLS feature when pointing at Cloud Run.
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking"] }

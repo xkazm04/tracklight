@@ -808,7 +808,8 @@ dependencies = [
 name = "lighttrack-mcp"
 version = "0.0.1"
 dependencies = [
- "lighttrack-core",
+ "reqwest",
+ "serde_json",
 ]
 
 [[package]]

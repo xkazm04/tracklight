@@ -34,9 +34,12 @@ Evolved daily. Checked items are done; the rest is the plan we agreed on.
 - [ ] `BenchmarkDefinition` + run + scorecard + regression baseline  → Phase 3.5
 - [ ] Scheduled online sampling + MCP trigger  → Phase 3.5 / Phase 4
 
-## Phase 4 — MCP
-- [ ] `mcp`: `query_traces`, `get_cost_summary`, `list_projects`, `get_limit_status`, `run_benchmark`
-- [ ] Register with Claude Code; dogfood querying LightTrack from the terminal
+## Phase 4 — MCP ✅
+- [x] `mcp` (`lt-mcp`): hand-rolled JSON-RPC 2.0 stdio server (no SDK); thin HTTP client of the API
+- [x] Tools: `list_projects`, `get_cost_summary`, `query_events`, `get_limit_status`, `list_scores`
+- [x] Verified via a real JSON-RPC session (initialize → tools/list → tools/call returning live data)
+- [x] `.mcp.json` committed for project-scoped registration in Claude Code
+- [ ] `run_benchmark` tool  → after Phase 3.5 (benchmarks)
 
 ## Phase 5 — Cloud move
 - [ ] BigQuery `Store` backend + Firestore config backend
