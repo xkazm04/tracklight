@@ -68,7 +68,13 @@ Evolved daily. Checked items are done; the rest is the plan we agreed on.
       `lt-runner serve [--once --interval --stale-secs]` claims→runs→finishes with retry up to max_attempts.
       *Verified:* enqueue returned instantly while ingest kept serving; worker ran the bench and marked the
       job `done` with a result; run persisted.
-- [ ] 3.6e Multi-provider generation (Claude via `claude -p` now; OpenAI/Gemini when keyed)
+- [x] 3.6e Multi-provider/multi-prompt generation: `core::BenchTarget` (provider+model+system-prompt
+      variant, stored inline in the benchmark `target` field); `engine::generate` (Claude via `claude -p`
+      with target model + `--append-system-prompt`; OpenAI/Gemini return a clear "needs HTTPS adapter +
+      key" error until enabled); `lt-runner bench` compare mode generates per target, judges with a fixed
+      judge (rubric or freeform), records a run per target, prints a quality × cost × latency table + best.
+      *Verified:* concise vs verbose Claude prompt variants (1.0 vs 0.5 on a concision rubric), OpenAI
+      target skipped gracefully without a key. **Phase 3.6 benchmark framework complete.**
 
 ## Phase 4 — MCP ✅
 - [x] `mcp` (`lt-mcp`): hand-rolled JSON-RPC 2.0 stdio server (no SDK); thin HTTP client of the API

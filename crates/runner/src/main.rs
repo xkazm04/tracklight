@@ -19,9 +19,10 @@ use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 
 use lighttrack_anon::scrub;
-use lighttrack_core::{Benchmark, BenchmarkCase, DatasetItem, Job, LlmEvent, Rubric};
+use lighttrack_core::{BenchTarget, Benchmark, BenchmarkCase, DatasetItem, Job, LlmEvent, Rubric};
 use lighttrack_engine::{
-    build_eval_prompt, build_judge_prompt, run_judge, run_rubric_judge, run_text, EngineConfig,
+    build_eval_prompt, build_judge_prompt, generate, run_judge, run_rubric_judge, run_text,
+    EngineConfig,
 };
 
 #[derive(Parser)]
@@ -260,6 +261,134 @@ fn process_job(
             Ok(json!({ "benchmark_id": bid, "status": "completed" }))
         }
         other => Err(anyhow::anyhow!("unknown job type: {other}")),
+    }
+}
+
+/// Comparison mode: generate outputs from each target, judge them, and compare quality × cost × latency.
+#[allow(clippy::too_many_arguments)]
+fn run_compare(
+    cli: &Cli,
+    http: &reqwest::blocking::Client,
+    engine: &EngineConfig,
+    bench: &Benchmark,
+    cases: &[BenchmarkCase],
+    targets: &[BenchTarget],
+    samples: u32,
+) -> Result<()> {
+    println!(
+        "benchmark '{}' COMPARE: {} target(s) × {} case(s), judge={}",
+        bench.name,
+        targets.len(),
+        cases.len(),
+        engine.model
+    );
+    let rubric: Option<Rubric> = match &bench.rubric_id {
+        Some(rid) => Some(get(cli, http, &format!("/v1/rubrics/{rid}"))?),
+        None => None,
+    };
+
+    // (label, mean, pass_rate, gen_cost, judge_cost, p50_ms, errored)
+    let mut rows: Vec<(String, f64, f64, f64, f64, u64, u32)> = Vec::new();
+    for t in targets {
+        let label = t
+            .label
+            .clone()
+            .unwrap_or_else(|| format!("{}/{}", t.provider, t.model));
+        println!("\n-- target {label} --");
+        let (mut overall_sum, mut passes, mut judged, mut gen_cost, mut judge_cost, mut errored) =
+            (0.0_f64, 0u32, 0u32, 0.0_f64, 0.0_f64, 0u32);
+        let mut latencies: Vec<u64> = Vec::new();
+
+        for (i, case) in cases.iter().enumerate() {
+            let gen = match generate(
+                engine,
+                &t.provider,
+                &t.model,
+                t.system_prompt.as_deref(),
+                &case.input,
+            ) {
+                Ok(g) => g,
+                Err(e) => {
+                    println!("  case {}: generation skipped — {e}", i + 1);
+                    errored += 1;
+                    continue;
+                }
+            };
+            gen_cost += gen.cost_usd.unwrap_or(0.0);
+            if let Some(l) = gen.latency_ms {
+                latencies.push(l);
+            }
+            let (score, pass, jcost) = judge_output(engine, &rubric, bench, case, &gen.output, samples)?;
+            judge_cost += jcost;
+            overall_sum += score;
+            if pass {
+                passes += 1;
+            }
+            judged += 1;
+            println!("  case {}: generated → score={score:.2} pass={pass}", i + 1);
+        }
+
+        let mean = if judged > 0 { overall_sum / judged as f64 } else { 0.0 };
+        let pass_rate = if judged > 0 { passes as f64 / judged as f64 } else { 0.0 };
+        let (p50, p95) = percentiles(&mut latencies);
+        rows.push((label.clone(), mean, pass_rate, gen_cost, judge_cost, p50.unwrap_or(0), errored));
+
+        let report = json!({
+            "mode": "compare", "target": label, "provider": t.provider, "model": t.model,
+            "prompt_label": t.label, "gen_cost_usd": gen_cost, "judge_cost_usd": judge_cost,
+            "errored_cases": errored,
+        });
+        let run = json!({
+            "benchmark_id": bench.id, "n_cases": judged, "mean_score": mean, "pass_rate": pass_rate,
+            "cost_usd": gen_cost + judge_cost, "status": "compared",
+            "p50_latency_ms": p50, "p95_latency_ms": p95, "report": report,
+        });
+        post(cli, http, "/v1/benchmark-runs", &run)?;
+    }
+
+    println!("\n=== comparison ===");
+    println!(
+        "{:<26} {:>6} {:>7} {:>10} {:>10} {:>8} {:>4}",
+        "target", "mean", "pass%", "gen$", "judge$", "p50ms", "err"
+    );
+    for (label, mean, pr, gc, jc, p50, err) in &rows {
+        println!(
+            "{label:<26} {mean:>6.2} {:>6.0}% {gc:>10.5} {jc:>10.5} {p50:>8} {err:>4}",
+            pr * 100.0
+        );
+    }
+    if let Some(best) = rows
+        .iter()
+        .filter(|r| r.6 < cases.len() as u32) // had at least one non-errored case
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+    {
+        println!("best mean: {} ({:.2})", best.0, best.1);
+    }
+    Ok(())
+}
+
+/// Judge a single generated output via the rubric (if any) or the freeform rubric text.
+fn judge_output(
+    judge_engine: &EngineConfig,
+    rubric: &Option<Rubric>,
+    bench: &Benchmark,
+    case: &BenchmarkCase,
+    output: &str,
+    samples: u32,
+) -> Result<(f64, bool, f64)> {
+    if let Some(r) = rubric {
+        let o = run_rubric_judge(judge_engine, r, &case.input, case.expected.as_deref(), output, samples)
+            .context("rubric judge failed")?;
+        Ok((o.overall, o.pass, o.cost_usd.unwrap_or(0.0)))
+    } else {
+        let prompt = build_eval_prompt(&bench.rubric, &case.input, case.expected.as_deref(), output);
+        let v = run_judge(judge_engine, &prompt).context("judge failed")?;
+        let norm = if v.verdict.max > 0.0 {
+            v.verdict.score / v.verdict.max
+        } else {
+            v.verdict.score
+        };
+        Ok((norm, v.verdict.pass, v.cost_usd.unwrap_or(0.0)))
     }
 }
 
@@ -600,6 +729,13 @@ fn run_benchmark(
     } else {
         Vec::new()
     };
+
+    // Comparison mode: when the benchmark defines a target matrix, generate candidate outputs
+    // from each target and judge them (Phase 3.6e).
+    let targets: Vec<BenchTarget> = serde_json::from_value(bench.target.clone()).unwrap_or_default();
+    if !targets.is_empty() {
+        return run_compare(cli, http, engine, &bench, &cases, &targets, samples);
+    }
 
     // Structured rubric mode (per-dimension scoring + report) when the benchmark references a rubric.
     if let Some(rid) = bench.rubric_id.clone() {

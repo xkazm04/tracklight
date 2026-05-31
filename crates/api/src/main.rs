@@ -32,9 +32,9 @@ use serde::{Deserialize, Serialize};
 
 use auth::{AuthMode, Principal};
 use lighttrack_core::{
-    new_id, ApiKey, Benchmark, BenchmarkCase, BenchmarkRun, Dataset, DatasetItem, Job, LimitAction,
-    LimitMetric, LimitRule, LimitStatus, LimitWindow, LlmEvent, ModelPriceRow, PriceBook, Project,
-    Redaction, Rubric, RubricDimension, Score,
+    new_id, ApiKey, BenchTarget, Benchmark, BenchmarkCase, BenchmarkRun, Dataset, DatasetItem, Job,
+    LimitAction, LimitMetric, LimitRule, LimitStatus, LimitWindow, LlmEvent, ModelPriceRow,
+    PriceBook, Project, Redaction, Rubric, RubricDimension, Score,
 };
 use lighttrack_store::{CostRow, SqliteStore, Store, StoreError, Usage};
 
@@ -442,6 +442,9 @@ struct CreateBenchmarkReq {
     judge_model: String,
     #[serde(default)]
     target: serde_json::Value,
+    /// Comparison matrix: generate candidate outputs from each of these targets (Phase 3.6e).
+    #[serde(default)]
+    targets: Vec<BenchTarget>,
     #[serde(default)]
     dataset: Vec<BenchmarkCase>,
     /// Reference a stored dataset by id instead of (or in addition to) an inline dataset.
@@ -471,7 +474,12 @@ async fn create_benchmark(
         name: req.name,
         rubric: req.rubric,
         judge_model: req.judge_model,
-        target: req.target,
+        // The target matrix (if any) is stored in the `target` field as a JSON array.
+        target: if req.targets.is_empty() {
+            req.target
+        } else {
+            serde_json::to_value(&req.targets).unwrap_or(serde_json::Value::Null)
+        },
         dataset_ref: req.dataset_ref,
         dataset: req.dataset,
         rubric_id: req.rubric_id,

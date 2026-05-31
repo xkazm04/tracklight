@@ -30,6 +30,8 @@ pub enum EngineError {
     Parse(String),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Other(String),
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;
@@ -135,16 +137,25 @@ Respond with ONLY a JSON object (no prose, no code fences):\n\
     )
 }
 
-/// Run `claude -p` with the given prompt, returning the parsed JSON envelope and wall-clock latency.
-fn invoke(cfg: &EngineConfig, prompt: &str, schema: Option<&str>) -> Result<(Value, Option<u64>)> {
+/// Run `claude -p` with the given prompt/model, returning the parsed JSON envelope and wall-clock latency.
+fn invoke(
+    cfg: &EngineConfig,
+    prompt: &str,
+    model: &str,
+    system_prompt: Option<&str>,
+    schema: Option<&str>,
+) -> Result<(Value, Option<u64>)> {
     let mut cmd = Command::new(&cfg.claude_bin);
     cmd.arg("-p")
         .arg(prompt)
         .arg("--output-format")
         .arg("json")
         .arg("--model")
-        .arg(&cfg.model)
+        .arg(model)
         .stdin(Stdio::null()); // don't block waiting for piped stdin
+    if let Some(sys) = system_prompt {
+        cmd.arg("--append-system-prompt").arg(sys);
+    }
     if let Some(s) = schema {
         cmd.arg("--json-schema").arg(s);
     }
@@ -194,7 +205,7 @@ fn model_of(envelope: &Value, cfg: &EngineConfig) -> String {
 /// Run the judge with a fully-formed prompt.
 pub fn run_judge(cfg: &EngineConfig, prompt: &str) -> Result<JudgeOutcome> {
     let schema = judge_verdict_schema().to_string();
-    let (envelope, latency_ms) = invoke(cfg, prompt, Some(&schema))?;
+    let (envelope, latency_ms) = invoke(cfg, prompt, &cfg.model, None, Some(&schema))?;
     let (input_tokens, output_tokens) = token_counts(&envelope);
     Ok(JudgeOutcome {
         verdict: parse_verdict(&envelope)?,
@@ -213,7 +224,7 @@ pub fn run_judge(cfg: &EngineConfig, prompt: &str) -> Result<JudgeOutcome> {
 /// Run a free-form text generation (no schema), returning the `result` text. Used by the optional
 /// LLM anonymization pass.
 pub fn run_text(cfg: &EngineConfig, prompt: &str) -> Result<TextOutcome> {
-    let (envelope, latency_ms) = invoke(cfg, prompt, None)?;
+    let (envelope, latency_ms) = invoke(cfg, prompt, &cfg.model, None, None)?;
     Ok(TextOutcome {
         text: envelope
             .get("result")
@@ -349,7 +360,7 @@ pub fn run_rubric_judge(
     let mut model = cfg.model.clone();
 
     for s in 0..k {
-        let (envelope, latency) = invoke(cfg, &prompt, Some(&schema))?;
+        let (envelope, latency) = invoke(cfg, &prompt, &cfg.model, None, Some(&schema))?;
         let out = structured_or_result(&envelope);
         let mut sample: Vec<(String, f64)> = Vec::new();
         for d in &rubric.dimensions {
@@ -462,6 +473,63 @@ fn extract_json_object(s: &str) -> Option<String> {
         Some(s[start..=end].to_string())
     } else {
         None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generation (Phase 3.6e) — produce candidate outputs from a target model
+// ---------------------------------------------------------------------------
+
+/// The result of generating one candidate output from a target.
+#[derive(Debug, Clone)]
+pub struct GenOutcome {
+    pub output: String,
+    pub cost_usd: Option<f64>,
+    pub model: String,
+    pub latency_ms: Option<u64>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+}
+
+/// Generate a candidate output from a target. `anthropic` runs via `claude -p`; other providers
+/// need an HTTPS adapter + API key (return a clear error until enabled — "Claude now, keys later").
+pub fn generate(
+    cfg: &EngineConfig,
+    provider: &str,
+    model: &str,
+    system_prompt: Option<&str>,
+    input: &str,
+) -> Result<GenOutcome> {
+    match provider {
+        "anthropic" => {
+            let (envelope, latency_ms) = invoke(cfg, input, model, system_prompt, None)?;
+            let (input_tokens, output_tokens) = token_counts(&envelope);
+            Ok(GenOutcome {
+                output: envelope
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                cost_usd: envelope.get("total_cost_usd").and_then(Value::as_f64),
+                model: envelope
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| model.to_string()),
+                latency_ms,
+                input_tokens,
+                output_tokens,
+            })
+        }
+        "openai" => Err(EngineError::Other(
+            "provider 'openai' generation needs an HTTPS adapter + OPENAI_API_KEY (not yet enabled)"
+                .into(),
+        )),
+        "google" => Err(EngineError::Other(
+            "provider 'google' generation needs an HTTPS adapter + GEMINI_API_KEY (not yet enabled)"
+                .into(),
+        )),
+        other => Err(EngineError::Other(format!("unknown provider '{other}'"))),
     }
 }
 

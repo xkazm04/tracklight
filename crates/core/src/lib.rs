@@ -23,7 +23,7 @@ pub use limits::{LimitAction, LimitMetric, LimitRule, LimitStatus, LimitWindow};
 pub use pricing::{ModelPrice, ModelPriceRow, PriceBook};
 pub use project::{ApiKey, Project, Redaction};
 pub use score::{
-    judge_verdict_schema, Benchmark, BenchmarkCase, BenchmarkRun, JudgeVerdict, Score,
+    judge_verdict_schema, Benchmark, BenchmarkCase, BenchmarkRun, BenchTarget, JudgeVerdict, Score,
 };
 
 /// Convenience: a fresh UUIDv4 as a `String` (our canonical id form).
