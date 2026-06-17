@@ -1,0 +1,22 @@
+# Cloud Build: build the LightTrack image from source and push to Artifact Registry.
+# Used by deploy/cloudrun/deploy.{sh,ps1} when run with --build (e.g. on a fork with local
+# changes). Run manually from the repo root:
+#   gcloud builds submit --config deploy/cloudrun/cloudbuild.yaml \
+#     --substitutions=_IMAGE=us-central1-docker.pkg.dev/PROJECT/lighttrack/lighttrack:latest
+#
+# The build context is the repo root (.) so `schema/` and `config/` (include_str!'d / copied at
+# build time) are present; .dockerignore keeps target/.git/etc. out of the upload.
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "deploy/docker/Dockerfile", "-t", "${_IMAGE}", "."]
+
+images:
+  - "${_IMAGE}"
+
+# A release build of the Rust workspace is CPU-bound. The default (free-tier-eligible) machine works
+# but is slow (~15-20 min). Uncomment for a faster build (bills from the first minute — a few cents):
+# options:
+#   machineType: E2_HIGHCPU_8
+
+timeout: 3600s
