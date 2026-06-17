@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, RwLock};
 
+use lighttrack_billing::BillingRegistry;
 use lighttrack_core::PriceBook;
 use lighttrack_store::{Store, StoreError};
 
@@ -21,6 +22,8 @@ pub(crate) struct AppState {
     pub(crate) alerts: Arc<Alerter>,
     /// Optional PII redaction of captured input/output on ingest, configured from env.
     pub(crate) redact: Arc<Redactor>,
+    /// Configured billing-webhook sources (Stripe/Polar), keyed by provider.
+    pub(crate) billing: Arc<BillingRegistry>,
 }
 
 /// Run a blocking store call on the blocking pool and flatten the two error layers.

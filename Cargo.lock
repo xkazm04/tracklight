@@ -1068,6 +1068,7 @@ dependencies = [
  "axum",
  "chrono",
  "lighttrack-anon",
+ "lighttrack-billing",
  "lighttrack-core",
  "lighttrack-store",
  "lighttrack-store-firestore",
@@ -1080,11 +1081,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "lighttrack-billing"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "chrono",
+ "hmac",
+ "lighttrack-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "lighttrack-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
+ "lighttrack-render",
  "reqwest",
  "serde_json",
 ]
@@ -1114,7 +1130,15 @@ dependencies = [
 name = "lighttrack-mcp"
 version = "0.0.1"
 dependencies = [
+ "lighttrack-render",
  "reqwest",
+ "serde_json",
+]
+
+[[package]]
+name = "lighttrack-render"
+version = "0.0.1"
+dependencies = [
  "serde_json",
 ]
 
@@ -1126,8 +1150,10 @@ dependencies = [
  "clap",
  "dotenvy",
  "lighttrack-anon",
+ "lighttrack-billing",
  "lighttrack-core",
  "lighttrack-engine",
+ "lighttrack-render",
  "reqwest",
  "serde",
  "serde_json",

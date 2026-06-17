@@ -16,8 +16,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use lighttrack_core::{
-    ApiKey, Benchmark, BenchmarkRun, Dataset, DatasetItem, Job, LimitRule, LlmEvent, ModelPriceRow,
-    Project, Rubric, Score,
+    ApiKey, Benchmark, BenchmarkRun, CostByDimension, Dataset, DatasetItem, Job, LimitRule, LlmEvent,
+    ModelPriceRow, Project, RevenueEvent, Rubric, Score,
 };
 
 pub use sqlite::SqliteStore;
@@ -126,4 +126,34 @@ pub trait Store: Send + Sync {
     fn finish_job(&self, id: &str, status: &str, result: &Value, error: Option<&str>) -> Result<()>;
     fn get_job(&self, id: &str) -> Result<Option<Job>>;
     fn list_jobs(&self, status: Option<&str>, limit: usize) -> Result<Vec<Job>>;
+
+    // --- revenue + margin (Phase 1 profit tracking) ---
+    // Default impls so backends that don't (yet) support profit tracking compile unchanged: cost is a
+    // no-op (empty), and inserting revenue is a clear error rather than a silent drop.
+    /// Persist one normalized revenue record.
+    fn insert_revenue_event(&self, _ev: &RevenueEvent) -> Result<()> {
+        Err(StoreError::Other(
+            "revenue tracking is not supported by this store backend".to_string(),
+        ))
+    }
+    /// Revenue records that may be recognized within `[since, until)`, optionally scoped to a project.
+    fn list_revenue_events(
+        &self,
+        _project: Option<&str>,
+        _since: DateTime<Utc>,
+        _until: DateTime<Utc>,
+    ) -> Result<Vec<RevenueEvent>> {
+        Ok(Vec::new())
+    }
+    /// LLM cost grouped by a billing dimension (`customer` | `product`, from event metadata) over
+    /// `[since, until)`.
+    fn cost_by_dimension(
+        &self,
+        _project: Option<&str>,
+        _dim: &str,
+        _since: DateTime<Utc>,
+        _until: DateTime<Utc>,
+    ) -> Result<Vec<CostByDimension>> {
+        Ok(Vec::new())
+    }
 }

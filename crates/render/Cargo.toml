@@ -1,0 +1,9 @@
+[package]
+name = "lighttrack-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Markdown rendering of LightTrack API responses — shared by the `lt` CLI and `lt-mcp`."
+
+[dependencies]
+serde_json.workspace = true

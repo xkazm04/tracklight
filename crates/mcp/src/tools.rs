@@ -4,7 +4,7 @@
 use serde_json::{json, Value};
 
 use crate::client::Client;
-use crate::rpc::tool_text;
+use crate::rpc::{tool_rendered, tool_text};
 use crate::{read, write};
 
 /// The `tools/list` payload. Write tools appear only when `allow_writes`.
@@ -37,7 +37,10 @@ pub(crate) fn call(c: &Client, allow_writes: bool, params: &Value) -> Value {
     };
 
     match outcome {
-        Ok(v) => tool_text(&serde_json::to_string_pretty(&v).unwrap_or_default(), false),
+        Ok(v) => match lighttrack_render::render(name, &v) {
+            Some(md) => tool_rendered(&md, &v),
+            None => tool_text(&serde_json::to_string_pretty(&v).unwrap_or_default(), false),
+        },
         Err(e) => tool_text(&format!("error: {e}"), true),
     }
 }

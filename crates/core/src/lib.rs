@@ -5,20 +5,26 @@
 //! calculation, per-project [`limits`] evaluation, and the [`score`] /benchmark types.
 
 pub mod calibration;
+pub mod customer;
 pub mod dataset;
 pub mod error;
 pub mod event;
 pub mod job;
 pub mod limits;
+pub mod margin;
 pub mod pricing;
 pub mod project;
+pub mod revenue;
 pub mod rubric;
 pub mod score;
 
 pub use calibration::{agreement, Agreement, CalibrationItem};
+pub use customer::{BillingProduct, Customer};
 pub use dataset::{Dataset, DatasetItem};
 pub use error::LtError;
 pub use job::Job;
+pub use margin::{compute_margin, CostByDimension, MarginDimension, MarginRow};
+pub use revenue::{RevenueEvent, RevenueKind};
 pub use rubric::{Rubric, RubricDimension};
 pub use event::{LlmEvent, Operation, Provider, Status, TokenUsage};
 pub use limits::{LimitAction, LimitMetric, LimitRule, LimitStatus, LimitWindow};

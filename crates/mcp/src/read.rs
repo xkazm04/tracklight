@@ -13,6 +13,13 @@ pub(crate) fn tools() -> Vec<Value> {
             json!({"type":"object","properties":{}})),
         tool("get_cost_summary", "Cost/usage rollup grouped by project + provider + model. Optionally filter by project.",
             json!({"type":"object","properties":{"project":{"type":"string"}}})),
+        tool("get_margin", "Profit rollup: revenue − LLM cost grouped by customer or product over a window (default last 30 days). Most-unprofitable first.",
+            json!({"type":"object","properties":{
+                "by":{"type":"string","enum":["customer","product"],"description":"group dimension (default customer)"},
+                "project":{"type":"string"},
+                "since":{"type":"string","description":"RFC3339 window start (default 30d ago)"},
+                "until":{"type":"string","description":"RFC3339 window end (default now)"}
+            }})),
         tool("query_events", "Recent LLM call events (newest first). Optionally filter by project.",
             json!({"type":"object","properties":{"project":{"type":"string"},"limit":{"type":"integer","description":"max events (default 20)"}}})),
         tool("get_event", "Fetch a single LLM call event by id.",
@@ -49,12 +56,19 @@ pub(crate) fn tools() -> Vec<Value> {
 }
 
 fn tool(name: &str, desc: &str, schema: Value) -> Value {
-    json!({
+    let mut t = json!({
         "name": name,
         "description": desc,
         "inputSchema": schema,
         "annotations": { "readOnlyHint": true, "openWorldHint": true }
-    })
+    });
+    // Tools that return rendered data also advertise the shape of their `structuredContent`.
+    if let Some(out) = crate::schemas::output_schema(name) {
+        if let Some(obj) = t.as_object_mut() {
+            obj.insert("outputSchema".to_string(), out);
+        }
+    }
+    t
 }
 
 /// Route a read tool. Returns `None` if `name` is not a read tool (so the caller can try writes).
@@ -62,6 +76,7 @@ pub(crate) fn dispatch(c: &Client, name: &str, args: &Value) -> Option<Result<Va
     let r = match name {
         "list_projects" => c.get("/v1/projects"),
         "get_cost_summary" => c.get(&with_project("/v1/costs", args)),
+        "get_margin" => c.get(&margin_path(args)),
         "query_events" => c.get(&list_path("/v1/events", args)),
         "get_event" => bind(args, "event", |id| c.get(&format!("/v1/events/{id}"))),
         "list_scores" => c.get(&list_path("/v1/scores", args)),
@@ -103,6 +118,17 @@ fn list_path(base: &str, args: &Value) -> String {
     let mut p = format!("{base}?limit={limit}");
     if let Some(proj) = args.get("project").and_then(Value::as_str) {
         p.push_str(&format!("&project={proj}"));
+    }
+    p
+}
+
+fn margin_path(args: &Value) -> String {
+    let by = args.get("by").and_then(Value::as_str).unwrap_or("customer");
+    let mut p = format!("/v1/margin?by={by}");
+    for k in ["project", "since", "until"] {
+        if let Some(v) = args.get(k).and_then(Value::as_str) {
+            p.push_str(&format!("&{k}={v}"));
+        }
     }
     p
 }

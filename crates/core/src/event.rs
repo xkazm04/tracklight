@@ -172,6 +172,18 @@ impl LlmEvent {
         self.cost_usd
     }
 
+    /// Billing customer this call is attributed to, read from `metadata.customer_id`. The linkage
+    /// rides in `metadata` (not a column) so it stays backward-compatible across every store backend;
+    /// margin rollups group on it. `None` when the SDK didn't tag the call.
+    pub fn customer_id(&self) -> Option<&str> {
+        self.metadata.get("customer_id").and_then(Value::as_str)
+    }
+
+    /// Billing product/feature this call is attributed to, read from `metadata.product_id`.
+    pub fn product_id(&self) -> Option<&str> {
+        self.metadata.get("product_id").and_then(Value::as_str)
+    }
+
     /// The pricing lane for this call: an explicit `metadata.pricing_mode`, else a `batch` / `flex`
     /// (or `priority`) tag, else standard.
     fn pricing_mode(&self) -> PricingMode {
@@ -185,5 +197,32 @@ impl LlmEvent {
             return PricingMode::Flex;
         }
         PricingMode::Standard
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn ev(metadata: Value) -> LlmEvent {
+        serde_json::from_value(json!({
+            "provider": "anthropic", "model": "claude-haiku-4-5", "metadata": metadata
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn billing_ids_read_from_metadata() {
+        let e = ev(json!({ "customer_id": "cus_123", "product_id": "chat" }));
+        assert_eq!(e.customer_id(), Some("cus_123"));
+        assert_eq!(e.product_id(), Some("chat"));
+    }
+
+    #[test]
+    fn billing_ids_absent_when_untagged() {
+        assert_eq!(ev(Value::Null).customer_id(), None);
+        assert_eq!(ev(json!({ "other": 1 })).product_id(), None);
     }
 }

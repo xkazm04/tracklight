@@ -10,6 +10,7 @@ mod events;
 mod jobs;
 mod prices;
 mod projects;
+mod revenue;
 mod rubrics;
 mod scores;
 mod util;
@@ -25,8 +26,8 @@ use rusqlite::Connection;
 use serde_json::Value;
 
 use lighttrack_core::{
-    ApiKey, Benchmark, BenchmarkRun, Dataset, DatasetItem, Job, LimitRule, LlmEvent, ModelPriceRow,
-    Project, Rubric, Score,
+    ApiKey, Benchmark, BenchmarkRun, CostByDimension, Dataset, DatasetItem, Job, LimitRule, LlmEvent,
+    ModelPriceRow, Project, RevenueEvent, Rubric, Score,
 };
 
 use crate::{CostRow, Result, Store, Usage};
@@ -201,5 +202,27 @@ impl Store for SqliteStore {
     }
     fn list_jobs(&self, status: Option<&str>, limit: usize) -> Result<Vec<Job>> {
         self.with(|c| jobs::list(c, status, limit))
+    }
+
+    // --- revenue + margin (Phase 1 profit tracking) ---
+    fn insert_revenue_event(&self, ev: &RevenueEvent) -> Result<()> {
+        self.with(|c| revenue::insert(c, ev))
+    }
+    fn list_revenue_events(
+        &self,
+        project: Option<&str>,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<Vec<RevenueEvent>> {
+        self.with(|c| revenue::list(c, project, since, until))
+    }
+    fn cost_by_dimension(
+        &self,
+        project: Option<&str>,
+        dim: &str,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<Vec<CostByDimension>> {
+        self.with(|c| revenue::cost_by_dimension(c, project, dim, since, until))
     }
 }

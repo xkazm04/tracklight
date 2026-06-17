@@ -8,6 +8,7 @@
 //! (+`compare`, `rubric`), `serve`.
 
 mod bench;
+mod billing;
 mod calibrate;
 mod cli;
 mod compare;
@@ -22,7 +23,7 @@ mod util;
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Cmd, DatasetCmd};
+use cli::{BillingCmd, Cli, Cmd, DatasetCmd};
 use lighttrack_engine::EngineConfig;
 
 fn main() -> Result<()> {
@@ -61,6 +62,13 @@ fn main() -> Result<()> {
                 n,
                 llm_scrub,
             } => dataset::build_dataset(&cli, &http, &engine, project, name, *n, *llm_scrub),
+        },
+        Cmd::Billing { action } => match action {
+            BillingCmd::Sync {
+                provider,
+                project,
+                days,
+            } => billing::sync(&cli, &http, provider, project, *days),
         },
         Cmd::Schedule {
             project,

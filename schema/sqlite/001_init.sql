@@ -165,3 +165,22 @@ CREATE TABLE IF NOT EXISTS dataset_items (
   anonymization   TEXT         -- JSON {method, redactions}
 );
 CREATE INDEX IF NOT EXISTS idx_dataset_items_ds ON dataset_items(dataset_id);
+
+-- Normalized revenue (Phase 1 profit tracking): the revenue analog of events' cost. Synced from a
+-- billing provider (Stripe/Polar) or posted by hand; netted against LLM cost per customer/product.
+CREATE TABLE IF NOT EXISTS revenue_events (
+  id            TEXT PRIMARY KEY,
+  project_id    TEXT NOT NULL,
+  source        TEXT NOT NULL DEFAULT 'manual',  -- stripe | polar | manual
+  external_id   TEXT,                            -- provider invoice/charge/order id (idempotency)
+  customer_id   TEXT,
+  product_id    TEXT,
+  amount_usd    REAL NOT NULL,                   -- non-negative magnitude; sign derived from kind
+  currency      TEXT NOT NULL DEFAULT 'USD',
+  kind          TEXT NOT NULL DEFAULT 'one_time',-- subscription | one_time | usage | refund
+  period_start  TEXT,                            -- subscription recognition window (RFC3339)
+  period_end    TEXT,
+  ts            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_revenue_project_ts ON revenue_events(project_id, ts);
+CREATE INDEX IF NOT EXISTS idx_revenue_customer ON revenue_events(customer_id);

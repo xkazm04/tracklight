@@ -16,6 +16,9 @@
 //!   POST /v1/projects  GET /v1/projects   POST /v1/projects/:id/keys
 //!   POST /v1/projects/:id/limits  GET /v1/projects/:id/limits
 //!   GET  /v1/limits/status?project=      evaluate limits -> throttle flag + per-rule status
+//!   POST /v1/revenue                     record revenue (manual / billing sync) for profit tracking
+//!   GET  /v1/margin?by=customer|product&since=&until=   revenue − LLM cost rollup
+//!   POST /v1/billing/:provider/webhook?project=   signed Stripe/Polar webhook → revenue (unauth; HMAC)
 //!
 //! Env: LIGHTTRACK_BIND, LIGHTTRACK_DB, LIGHTTRACK_DATABASE_URL, LIGHTTRACK_PRICING,
 //!      LIGHTTRACK_AUTH_MODE (dev|enforced), LIGHTTRACK_ADMIN_KEY,
@@ -25,6 +28,7 @@
 mod alerts;
 mod auth;
 mod benchmarks;
+mod billing;
 mod datasets;
 mod error;
 mod events;
@@ -34,6 +38,7 @@ mod limits;
 mod prices;
 mod projects;
 mod redact;
+mod revenue;
 mod rubrics;
 mod scores;
 mod state;
@@ -113,6 +118,8 @@ async fn main() -> anyhow::Result<()> {
     let alerts_desc = alerts.describe();
     let redact = Arc::new(redact::Redactor::from_env());
     let redact_desc = redact.describe();
+    let billing = Arc::new(lighttrack_billing::BillingRegistry::from_env());
+    let billing_desc = billing.describe();
     let state = AppState {
         store,
         prices: Arc::new(RwLock::new(book)),
@@ -120,10 +127,11 @@ async fn main() -> anyhow::Result<()> {
         admin_key,
         alerts,
         redact,
+        billing,
     };
 
     println!(
-        "lighttrack-api v{} on http://{bind}  (store={backend}, {n_prices} priced models, auth={:?}, admin_key={}, alerts={alerts_desc}, redact={redact_desc})",
+        "lighttrack-api v{} on http://{bind}  (store={backend}, {n_prices} priced models, auth={:?}, admin_key={}, alerts={alerts_desc}, redact={redact_desc}, billing={billing_desc})",
         env!("CARGO_PKG_VERSION"),
         state.auth_mode,
         if state.admin_key.is_some() { "set" } else { "unset" },
@@ -180,6 +188,9 @@ fn build_router(state: AppState) -> Router {
             post(limits::create_limit).get(limits::list_limits),
         )
         .route("/v1/limits/status", get(limits::limits_status))
+        .route("/v1/revenue", post(revenue::post_revenue))
+        .route("/v1/margin", get(revenue::get_margin))
+        .route("/v1/billing/:provider/webhook", post(billing::post_webhook))
         .with_state(state)
 }
 

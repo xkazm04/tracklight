@@ -12,7 +12,7 @@ pub(crate) fn initialize_result(params: &Value) -> Value {
         .unwrap_or("2024-11-05");
     json!({
         "protocolVersion": pv,
-        "capabilities": { "tools": {} },
+        "capabilities": { "tools": {}, "prompts": {} },
         "serverInfo": { "name": "lighttrack-mcp", "version": env!("CARGO_PKG_VERSION") }
     })
 }
@@ -20,6 +20,23 @@ pub(crate) fn initialize_result(params: &Value) -> Value {
 /// Wrap text as an MCP tool-call result (`content` + `isError`).
 pub(crate) fn tool_text(text: &str, is_error: bool) -> Value {
     json!({ "content": [ { "type": "text", "text": text } ], "isError": is_error })
+}
+
+/// A rendered tool result: human-facing Markdown in `content` (what Claude Code shows + relays),
+/// plus the exact raw object in `structuredContent` (arrays wrapped under `items`) for clients/agents
+/// that consume structure. The Markdown carries full ids so follow-up calls work even where a client
+/// drops `structuredContent`.
+pub(crate) fn tool_rendered(markdown: &str, raw: &Value) -> Value {
+    let structured = if raw.is_array() {
+        json!({ "items": raw })
+    } else {
+        raw.clone()
+    };
+    json!({
+        "content": [ { "type": "text", "text": markdown } ],
+        "structuredContent": structured,
+        "isError": false
+    })
 }
 
 pub(crate) fn send_result(out: &mut impl Write, id: Option<Value>, result: Value) {

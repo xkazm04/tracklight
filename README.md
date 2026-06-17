@@ -11,13 +11,17 @@ your laptop or any cloud.
 - **Track** LLM calls from your apps via drop-in **Python / TypeScript / Rust** SDKs — across
   **OpenAI, Anthropic, and Google (Gemini)**.
 - **Cost** accounting per call / model / project, from a maintained, DB-backed price book.
+- **Profit** per customer / product — net **revenue** (Stripe/Polar webhooks, or `lt-runner billing
+  sync`) against LLM cost to surface unprofitable users (`GET /v1/margin`, `lt margin`,
+  `/lighttrack:margin-report`).
 - **Limits** per project (cost, calls, tokens over hour/day/month) that incoming traffic can trip →
   alerts + an advisory throttle flag apps/MCP can read.
 - **Score & benchmark** traces with an LLM-as-judge run through `claude -p` (structured
   `--json-schema` verdicts); generate candidate outputs from OpenAI / Gemini / Anthropic.
 - **Notify** on limit breaches and score regressions.
 - **Visualize** with a provisioned **Grafana** dashboard over the Postgres store.
-- **Query from agents** via a built-in **MCP server** (Claude Code / any MCP client).
+- **Query from agents** via a built-in **MCP server** — rendered tables + slash-command workflows in
+  Claude Code (or any MCP client).
 
 ## Install
 
@@ -77,6 +81,20 @@ lt.track_openai(resp, latency_ms=120)          # model + usage → /v1/events; c
 | OpenAI | candidate generation | `OPENAI_API_KEY` |
 | Google Gemini | candidate generation | `GEMINI_API_KEY` |
 
+### Billing providers — net revenue against cost
+Wire a billing provider to turn cost into **margin**. A signed webhook
+(`POST /v1/billing/stripe/webhook?project=<id>`, HMAC-verified — the signature is the auth, so no key
+header) streams paid invoices/refunds in as normalized revenue; `lt-runner billing sync` backfills from
+the provider API. Then `GET /v1/margin?by=customer|product` returns the revenue − LLM-cost rollup (judge
+spend excluded), most-unprofitable first.
+
+| Provider | Ingest | Secrets |
+|---|---|---|
+| Stripe | webhook (HMAC-SHA256/hex) + `billing sync` (backfill) | `LIGHTTRACK_STRIPE_WEBHOOK_SECRET`, `STRIPE_API_KEY` |
+| Polar | webhook (Standard Webhooks / base64) | `LIGHTTRACK_POLAR_WEBHOOK_SECRET` |
+
+Point each provider's webhook at `…/v1/billing/<provider>/webhook?project=<id>`.
+
 ### Databases — select with `LIGHTTRACK_DATABASE_URL`
 | Backend | Selector | Best for |
 |---|---|---|
@@ -95,7 +113,8 @@ lt.track_openai(resp, latency_ms=120)          # model + usage → /v1/events; c
 ### Observability & agents
 - **Grafana** — provisioned datasource + dashboard JSON in [`dashboards/grafana/`](dashboards/grafana)
   (over the Postgres store; brought up by the Postgres compose file).
-- **MCP** — `lt-mcp` exposes read tools to Claude Code / any MCP client (see below).
+- **MCP** — `lt-mcp` exposes rendered read tools + slash-command workflows to Claude Code / any MCP
+  client (see below).
 
 ## Status
 **v0.0.2 — early but functional, and published.** Implemented: the core data plane
@@ -126,10 +145,24 @@ docs/                   architecture, data model, packaging, roadmap, decisions
 ```
 
 ## Use from Claude Code (MCP)
-`lt-mcp` is an MCP server exposing read tools (`list_projects`, `get_cost_summary`, `query_events`,
-`get_limit_status`, `list_scores`) over the API. A project-scoped [`.mcp.json`](.mcp.json) is committed,
-so after `cargo build` and starting the API on `:8787`, open Claude Code in this repo and approve the
-`lighttrack` server — then ask things like *"what did project qa-demo spend?"* or *"show recent scores"*.
+`lt-mcp` is an MCP server over the API: **19 read tools** (events / costs / margin / scores / limits /
+prices / projects / benchmarks + runs / datasets + items / rubrics / jobs) plus **9 write tools** (enqueue runs,
+create project/dataset/rubric/benchmark/limit, `put_price`). Writes are **off by default**, gated behind
+`LIGHTTRACK_MCP_ALLOW_WRITES=1` on top of the API's admin checks; key-minting is deliberately not exposed.
+
+A project-scoped [`.mcp.json`](.mcp.json) is committed, so after `cargo build` and starting the API on
+`:8787`, open Claude Code in this repo and approve the `lighttrack` server — then ask *"what did project
+qa-demo spend?"* or *"did the latest capitals-qa run regress?"*.
+
+**Rendered output.** Tool results come back as compact **Markdown** — aligned tables, ✅/❌/⚠️ status
+glyphs, and `▁▃▅▇` trend sparklines (cost rollups, benchmark leaderboards, limit status) — alongside the
+raw object as `structuredContent` (each read tool also declares an `outputSchema`). The same render layer
+powers the `lt` CLI (tables on a TTY; `--json` to opt out) and the `lt-runner bench` compare leaderboard.
+
+**Slash commands.** The server ships MCP prompts that Claude Code surfaces as slash commands:
+`/lighttrack:cost-report`, `/lighttrack:limit-check`, `/lighttrack:benchmark-leaderboard`,
+`/lighttrack:score-triage`, `/lighttrack:recent-activity`, `/lighttrack:price-book`,
+`/lighttrack:margin-report`.
 
 - Windows path is `target/debug/lt-mcp.exe`; on Linux/macOS change it to `target/debug/lt-mcp`.
 - In `enforced` auth mode, add `"LIGHTTRACK_KEY": "<admin-or-project-key>"` to the server's `env`.

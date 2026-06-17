@@ -12,6 +12,8 @@
 //!   lt costs --project <id>
 //!   lt events --project <id> --limit 20
 
+use std::io::IsTerminal;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use reqwest::Method;
@@ -24,6 +26,9 @@ struct Cli {
     base: String,
     #[arg(long, env = "LIGHTTRACK_KEY")]
     key: Option<String>,
+    /// Print raw JSON instead of the rendered table view (also implied when stdout is piped).
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -56,6 +61,19 @@ enum Cmd {
         project: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+    },
+    /// Profit margin: revenue − LLM cost by customer or product (default window: last 30 days).
+    Margin {
+        #[arg(long, default_value = "customer")]
+        by: String,
+        #[arg(long)]
+        project: Option<String>,
+        /// RFC3339 window start (default 30d ago).
+        #[arg(long)]
+        since: Option<String>,
+        /// RFC3339 window end (default now).
+        #[arg(long)]
+        until: Option<String>,
     },
 }
 
@@ -107,9 +125,9 @@ fn main() -> Result<()> {
     match &cli.cmd {
         Cmd::Projects { action } => match action {
             ProjectsCmd::Create { name } => {
-                call(&cli, Method::POST, "/v1/projects", Some(json!({ "name": name })))
+                call(&cli, Method::POST, "/v1/projects", Some(json!({ "name": name })), "")
             }
-            ProjectsCmd::List => call(&cli, Method::GET, "/v1/projects", None),
+            ProjectsCmd::List => call(&cli, Method::GET, "/v1/projects", None, "list_projects"),
         },
         Cmd::Keys { action } => match action {
             KeysCmd::Create { project, name } => call(
@@ -117,6 +135,7 @@ fn main() -> Result<()> {
                 Method::POST,
                 &format!("/v1/projects/{project}/keys"),
                 Some(json!({ "name": name })),
+                "",
             ),
         },
         Cmd::Limits { action } => match action {
@@ -134,24 +153,45 @@ fn main() -> Result<()> {
                     "metric": metric, "window": window,
                     "threshold": threshold, "action": action
                 })),
+                "",
             ),
-            LimitsCmd::List { project } => {
-                call(&cli, Method::GET, &format!("/v1/projects/{project}/limits"), None)
-            }
+            LimitsCmd::List { project } => call(
+                &cli,
+                Method::GET,
+                &format!("/v1/projects/{project}/limits"),
+                None,
+                "list_limits",
+            ),
             LimitsCmd::Status { project } => call(
                 &cli,
                 Method::GET,
                 &format!("/v1/limits/status?project={project}"),
                 None,
+                "get_limit_status",
             ),
         },
-        Cmd::Costs { project } => call(&cli, Method::GET, &path_with_project("/v1/costs", project), None),
+        Cmd::Costs { project } => call(
+            &cli,
+            Method::GET,
+            &path_with_project("/v1/costs", project),
+            None,
+            "get_cost_summary",
+        ),
         Cmd::Events { project, limit } => {
             let mut p = format!("/v1/events?limit={limit}");
             if let Some(proj) = project {
                 p.push_str(&format!("&project={proj}"));
             }
-            call(&cli, Method::GET, &p, None)
+            call(&cli, Method::GET, &p, None, "query_events")
+        }
+        Cmd::Margin { by, project, since, until } => {
+            let mut p = format!("/v1/margin?by={by}");
+            for (k, v) in [("project", project), ("since", since), ("until", until)] {
+                if let Some(val) = v {
+                    p.push_str(&format!("&{k}={val}"));
+                }
+            }
+            call(&cli, Method::GET, &p, None, "get_margin")
         }
     }
 }
@@ -163,8 +203,10 @@ fn path_with_project(base: &str, project: &Option<String>) -> String {
     }
 }
 
-/// Issue one request, pretty-print the JSON response, and exit non-zero on HTTP error.
-fn call(cli: &Cli, method: Method, path: &str, body: Option<Value>) -> Result<()> {
+/// Issue one request and print the response, then exit non-zero on HTTP error. On a TTY (and unless
+/// `--json`) a successful response is shown as a rendered Markdown table for `kind`; piped or `--json`
+/// output stays raw JSON so scripts keep parsing it.
+fn call(cli: &Cli, method: Method, path: &str, body: Option<Value>, kind: &str) -> Result<()> {
     let client = reqwest::blocking::Client::new();
     let mut req = client.request(method, format!("{}{}", cli.base, path));
     if let Some(k) = &cli.key {
@@ -178,7 +220,15 @@ fn call(cli: &Cli, method: Method, path: &str, body: Option<Value>) -> Result<()
     let status = resp.status();
     let text = resp.text()?;
     match serde_json::from_str::<Value>(&text) {
-        Ok(v) => println!("{}", serde_json::to_string_pretty(&v)?),
+        Ok(v) => {
+            let rendered = (!cli.json && status.is_success() && std::io::stdout().is_terminal())
+                .then(|| lighttrack_render::render(kind, &v))
+                .flatten();
+            match rendered {
+                Some(md) => println!("{md}"),
+                None => println!("{}", serde_json::to_string_pretty(&v)?),
+            }
+        }
         Err(_) => println!("{text}"),
     }
     if !status.is_success() {

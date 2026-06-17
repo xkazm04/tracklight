@@ -199,23 +199,20 @@ pub(crate) fn run_compare(
         post(cli, http, "/v1/benchmark-runs", &run)?;
     }
 
-    println!("\n=== comparison ===");
-    println!(
-        "{:<26} {:>6} {:>7} {:>7} {:>10} {:>10} {:>8} {:>4}",
-        "target", "mean", "pass%", "agree", "gen$", "judge$", "p50ms", "err"
-    );
-    for (label, mean, pr, gc, jc, p50, err, agree) in &rows {
-        println!(
-            "{label:<26} {mean:>6.2} {:>6.0}% {agree:>7.2} {gc:>10.5} {jc:>10.5} {p50:>8} {err:>4}",
-            pr * 100.0
-        );
-    }
-    if let Some(best) = rows
+    // Render the leaderboard via the shared render layer, so the runner, CLI, and MCP agree.
+    let targets: Vec<Value> = rows
         .iter()
-        .filter(|r| r.6 < cases.len() as u32)
-        .max_by(|a, b| a.1.total_cmp(&b.1))
-    {
-        println!("best mean: {} ({:.2})", best.0, best.1);
+        .map(|(label, mean, pr, gc, jc, p50, err, agree)| {
+            json!({
+                "label": label, "mean": mean, "pass_rate": pr, "agreement": agree,
+                "gen_cost_usd": gc, "judge_cost_usd": jc, "p50_latency_ms": p50, "errored": err,
+            })
+        })
+        .collect();
+    let summary = json!({ "n_cases": cases.len(), "targets": targets });
+    match lighttrack_render::render("compare", &summary) {
+        Some(md) => println!("\n{md}"),
+        None => println!("\n{}", serde_json::to_string_pretty(&summary)?),
     }
     Ok(())
 }

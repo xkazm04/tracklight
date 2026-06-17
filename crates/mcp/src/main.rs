@@ -12,8 +12,10 @@
 //!      LIGHTTRACK_MCP_ALLOW_WRITES (1/true/yes/on enables writes).
 
 mod client;
+mod prompts;
 mod read;
 mod rpc;
+mod schemas;
 mod tools;
 mod write;
 
@@ -68,12 +70,16 @@ fn main() {
                 rpc::send_result(&mut out, id, tools::call(&client, allow_writes, &params))
             }
             "ping" => rpc::send_result(&mut out, id, json!({})),
+            "prompts/list" => rpc::send_result(&mut out, id, prompts::list()),
+            "prompts/get" => match prompts::get(&params) {
+                Ok(v) => rpc::send_result(&mut out, id, v),
+                Err(e) => rpc::send_error(&mut out, id, -32602, &e),
+            },
             // Capability probes we don't implement — answer with empties to avoid client noise.
             "resources/list" => rpc::send_result(&mut out, id, json!({ "resources": [] })),
             "resources/templates/list" => {
                 rpc::send_result(&mut out, id, json!({ "resourceTemplates": [] }))
             }
-            "prompts/list" => rpc::send_result(&mut out, id, json!({ "prompts": [] })),
             // Notifications carry no id and need no response.
             _ if id.is_none() => {}
             other => rpc::send_error(&mut out, id, -32601, &format!("method not found: {other}")),

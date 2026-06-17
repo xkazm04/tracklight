@@ -12,6 +12,8 @@ lighttrack-store-pg = { path = "../store-pg" }
 lighttrack-store-firestore = { path = "../store-firestore" }
 # Reuse the regex PII scrubber for optional content redaction on ingest.
 lighttrack-anon = { path = "../anon" }
+# Billing-provider webhook verification + normalization (Stripe/Polar).
+lighttrack-billing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true

@@ -1,0 +1,80 @@
+//! `lt-runner billing sync` — backfill/reconcile revenue from a billing provider into LightTrack.
+//!
+//! Stripe today: pulls paid invoices since a cutoff, normalizes them with `lighttrack-billing`
+//! (the same code the webhook uses), and POSTs each to `/v1/revenue` (idempotent by id). Needs
+//! `STRIPE_API_KEY`. Network-bound, so unverified in CI without live creds.
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{anyhow, Context, Result};
+use serde_json::Value;
+
+use lighttrack_billing::stripe::normalize_invoice;
+
+use crate::cli::Cli;
+use crate::http::post;
+
+pub(crate) fn sync(
+    cli: &Cli,
+    http: &reqwest::blocking::Client,
+    provider: &str,
+    project: &str,
+    days: i64,
+) -> Result<()> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+    let since = now - days.max(0) * 86_400;
+    match provider {
+        "stripe" => sync_stripe(cli, http, project, since),
+        other => Err(anyhow!("unsupported billing provider for sync: {other}")),
+    }
+}
+
+fn sync_stripe(cli: &Cli, http: &reqwest::blocking::Client, project: &str, since: i64) -> Result<()> {
+    let key = std::env::var("STRIPE_API_KEY").context("STRIPE_API_KEY is not set")?;
+    let mut starting_after: Option<String> = None;
+    let mut total = 0usize;
+
+    loop {
+        let mut params: Vec<(String, String)> = vec![
+            ("status".into(), "paid".into()),
+            ("limit".into(), "100".into()),
+            ("created[gte]".into(), since.to_string()),
+        ];
+        if let Some(after) = &starting_after {
+            params.push(("starting_after".into(), after.clone()));
+        }
+
+        let resp: Value = http
+            .get("https://api.stripe.com/v1/invoices")
+            .query(&params)
+            .bearer_auth(&key)
+            .send()?
+            .error_for_status()
+            .context("Stripe invoices request failed")?
+            .json()
+            .context("decoding Stripe response")?;
+
+        let data = resp.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
+        if data.is_empty() {
+            break;
+        }
+        for inv in &data {
+            if let Some(mut ev) = normalize_invoice(inv) {
+                ev.project_id = project.to_string();
+                post(cli, http, "/v1/revenue", &serde_json::to_value(&ev)?)?;
+                total += 1;
+            }
+        }
+        if !resp.get("has_more").and_then(Value::as_bool).unwrap_or(false) {
+            break;
+        }
+        starting_after = data
+            .last()
+            .and_then(|i| i.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
+
+    println!("synced {total} paid invoice(s) from stripe → project {project}");
+    Ok(())
+}

@@ -69,6 +69,11 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         action: DatasetCmd,
     },
+    /// Sync revenue from a billing provider (Stripe) into LightTrack, for profit tracking.
+    Billing {
+        #[command(subcommand)]
+        action: BillingCmd,
+    },
     /// Measure judge↔human agreement on a labeled set (Cohen's κ, correlation) to validate a rubric.
     Calibrate {
         /// JSONL (one object per line) or JSON-array file of {input, output, human_score, ...}.
@@ -141,5 +146,19 @@ pub(crate) enum DatasetCmd {
         /// Add an LLM (claude -p) anonymization pass for names/free-text PII the regex misses.
         #[arg(long)]
         llm_scrub: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum BillingCmd {
+    /// Pull paid invoices since a cutoff and post them as revenue (needs `STRIPE_API_KEY`).
+    Sync {
+        #[arg(long, default_value = "stripe")]
+        provider: String,
+        #[arg(long)]
+        project: String,
+        /// Look back this many days.
+        #[arg(long, default_value_t = 30)]
+        days: i64,
     },
 }
